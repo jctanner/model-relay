@@ -1,4 +1,4 @@
-# Model Relay
+# model-relay
 
 A Rust gateway with Vertex and Anthropic Messages interfaces for Claude Code, with persistent SQLite usage
 telemetry and a separate private REST listener. It includes a mock backend and an
