@@ -13,6 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 pub const DEFAULT_PROJECT: &str = "vertex-shim-local";
 fn default_profile() -> String {
@@ -240,6 +241,10 @@ pub fn routes() -> Router<App> {
             "/api/private/v1/projects/{project}/telemetry/summary",
             get(summary),
         )
+        .route(
+            "/api/private/v1/projects/{project}/telemetry/keys",
+            get(telemetry_keys),
+        )
 }
 pub async fn protect(
     State(app): State<App>,
@@ -328,6 +333,14 @@ async fn remove(State(app): State<App>, Path(id): Path<String>) -> Result<Status
 struct CredentialInput {
     client_id: String,
     #[serde(default)]
+    token_type: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "expiresIn", alias = "expires_in")]
+    expires_in: Option<String>,
+    #[serde(default)]
+    ephemeral: bool,
+    #[serde(default)]
     models: Vec<String>,
     #[serde(default)]
     backends: Vec<String>,
@@ -337,9 +350,32 @@ struct CredentialInput {
     vertex_catalog_models: bool,
     #[serde(default)]
     mock_adc: bool,
+    #[serde(default)]
+    exchange_only: bool,
 }
 impl CredentialInput {
-    fn key(self, project: String, key_id: String, verifier: String) -> Result<auth::Key, ApiError> {
+    fn is_maas(&self) -> bool {
+        self.token_type.as_deref() == Some("maas")
+    }
+    fn key(
+        self,
+        project: String,
+        key_id: String,
+        verifier: String,
+        expires_at_ms: Option<i64>,
+        ephemeral: bool,
+        name: Option<String>,
+    ) -> Result<auth::Key, ApiError> {
+        if self.exchange_only && !self.mock_adc {
+            return Err(ApiError::bad("Exchange-only keys require mock_adc=true"));
+        }
+        if self
+            .token_type
+            .as_deref()
+            .is_some_and(|kind| kind != "maas")
+        {
+            return Err(ApiError::bad("token_type must be maas"));
+        }
         if self.client_id.is_empty()
             || self.client_id.len() > 128
             || !self
@@ -368,17 +404,33 @@ impl CredentialInput {
             key_id,
             client_id: self.client_id,
             sha256: verifier,
+            expires_at_ms,
+            ephemeral,
+            name,
             models: self.models,
             backends: self.backends,
             catalog_models: self.catalog_models,
             vertex_catalog_models: self.vertex_catalog_models,
             mock_adc: self.mock_adc,
+            exchange_only: self.exchange_only,
         })
     }
 }
 fn public_key(key: &auth::Key) -> Value {
     let mut value = json!(key);
-    value.as_object_mut().unwrap().remove("sha256");
+    let fields = value.as_object_mut().unwrap();
+    fields.remove("sha256");
+    if let Some(expires_at_ms) = key.expires_at_ms {
+        fields.remove("expires_at_ms");
+        fields.insert("token_type".into(), json!("maas"));
+        fields.insert(
+            "expiresAt".into(),
+            json!(
+                chrono::DateTime::from_timestamp_millis(expires_at_ms)
+                    .map(|date| date.to_rfc3339())
+            ),
+        );
+    }
     value
 }
 fn get_key(c: &Connection, project: &str, id: &str) -> Result<auth::Key, ApiError> {
@@ -420,6 +472,46 @@ async fn credential(
         })
         .await
 }
+
+/// Read-only identities for telemetry, including keys managed in the file registry.
+/// Disabled/expired credentials remain selectable for their historical usage.
+async fn telemetry_keys(
+    State(app): State<App>,
+    Path(project): Path<String>,
+    Query(page): Query<Page>,
+) -> Result<Json<Value>, ApiError> {
+    let limit = page.limit.unwrap_or(100) as usize;
+    if !(1..=500).contains(&limit) || page.after_id.as_ref().is_some_and(|s| s.len() > 128) {
+        return Err(ApiError::bad("Invalid key pagination"));
+    }
+    let path = app.registry.clone();
+    let mut registry: auth::Registry = tokio::task::spawn_blocking(move || {
+        let bytes = std::fs::read(path).map_err(|_| ApiError::internal())?;
+        serde_json::from_slice(&bytes).map_err(|_| ApiError::internal())
+    })
+    .await
+    .map_err(|_| ApiError::internal())??;
+    app.store.control(false, move |c| {
+        load(c, &project)?;
+        registry.keys.retain(|key| key.project_id.as_deref().unwrap_or(DEFAULT_PROJECT) == project);
+        let after = page.after_id.unwrap_or_default();
+        let mut st = sql(c.prepare("SELECT payload FROM project_credentials WHERE project_id=?1 AND key_id>?2 ORDER BY key_id LIMIT ?3"))?;
+        let rows = sql(st.query_map(params![project,after,(limit+1) as u64], |r| r.get::<_, String>(0)))?;
+        for row in rows { registry.keys.push(decode(&sql(row)?)?); }
+        let mut keys = BTreeMap::new();
+        for key in registry.keys.into_iter().filter(|key| key.key_id > after) {
+            // Never serialize the verifier or secret into this read-only inventory.
+            let kind = if key.exchange_only { "vertex" } else if key.expires_at_ms.is_some() { "maas" } else if key.mock_adc { "legacy" } else { "anthropic" };
+            keys.insert(key.key_id.clone(), json!({
+                "project_id":project,"key_id":key.key_id,"client_id":key.client_id,
+                "name":key.name,"token_type":kind,"expires_at_ms":key.expires_at_ms,
+            }));
+        }
+        let more = keys.len() > limit;
+        let items: Vec<_> = keys.into_values().take(limit).collect();
+        Ok(Json(json!({"items":items,"next_after_id":if more {items.last().map(|key|key["key_id"].clone())} else {None}})))
+    }).await
+}
 fn secret() -> String {
     format!(
         "shim_{}{}",
@@ -427,16 +519,116 @@ fn secret() -> String {
         uuid::Uuid::new_v4().simple()
     )
 }
+fn base62(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let mut number = bytes.to_vec();
+    let mut encoded = Vec::new();
+    while number.iter().any(|byte| *byte != 0) {
+        let mut remainder = 0u16;
+        for byte in &mut number {
+            let value = (remainder << 8) | u16::from(*byte);
+            *byte = (value / 62) as u8;
+            remainder = value % 62;
+        }
+        encoded.push(ALPHABET[remainder as usize]);
+    }
+    if encoded.is_empty() {
+        encoded.push(ALPHABET[0]);
+    }
+    encoded.reverse();
+    String::from_utf8(encoded).expect("base62 is ASCII")
+}
+fn maas_secret() -> Result<String, ApiError> {
+    let mut entropy = [0u8; 44];
+    getrandom::fill(&mut entropy).map_err(|_| ApiError::internal())?;
+    let id = base62(&entropy[..12]);
+    let secret = base62(&entropy[12..]);
+    Ok(format!("sk-oai-{id}_{secret}"))
+}
+fn parse_duration(value: &str) -> Option<Duration> {
+    if value.is_empty() || value.len() > 32 {
+        return None;
+    }
+    let mut total = 0.0f64;
+    let mut number = String::new();
+    let mut saw_unit = false;
+    for ch in value.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            number.push(ch);
+            continue;
+        }
+        let amount: f64 = number.parse().ok()?;
+        if !amount.is_finite() || amount <= 0.0 {
+            return None;
+        }
+        let multiplier = match ch {
+            'd' => 86_400.0,
+            'h' => 3_600.0,
+            'm' => 60.0,
+            's' => 1.0,
+            _ => return None,
+        };
+        total += amount * multiplier;
+        number.clear();
+        saw_unit = true;
+    }
+    if !number.is_empty() || !saw_unit || total > i64::MAX as f64 / 1000.0 {
+        return None;
+    }
+    Some(Duration::from_millis((total * 1000.0).round() as u64))
+}
+fn maas_expiration(input: &CredentialInput) -> Result<i64, ApiError> {
+    let ephemeral = input.ephemeral;
+    if !ephemeral && input.name.as_deref().is_none_or(str::is_empty) {
+        return Err(ApiError::bad(
+            "name is required for non-ephemeral MaaS keys",
+        ));
+    }
+    let duration = match input.expires_in.as_deref() {
+        Some(value) => {
+            parse_duration(value).ok_or_else(|| ApiError::bad("Invalid expiresIn duration"))?
+        }
+        None if ephemeral => Duration::from_secs(3600),
+        None => Duration::from_secs(90 * 24 * 3600),
+    };
+    let max = if ephemeral {
+        Duration::from_secs(3600)
+    } else {
+        Duration::from_secs(90 * 24 * 3600)
+    };
+    if duration.is_zero() || duration > max {
+        return Err(ApiError::bad(
+            "MaaS key expiration exceeds the allowed lifetime",
+        ));
+    }
+    Ok(chrono::Utc::now()
+        .timestamp_millis()
+        .saturating_add(duration.as_millis() as i64))
+}
 async fn create_credential(
     State(app): State<App>,
     Path(project): Path<String>,
     Json(input): Json<CredentialInput>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let access = secret();
+    let is_maas = input.is_maas();
+    if !is_maas && (input.expires_in.is_some() || input.ephemeral || input.name.is_some()) {
+        return Err(ApiError::bad("MaaS key options require token_type=maas"));
+    }
+    let expires_at_ms = if is_maas {
+        Some(maas_expiration(&input)?)
+    } else {
+        None
+    };
+    let ephemeral = is_maas && input.ephemeral;
+    let name = input.name.clone();
+    let access = if is_maas { maas_secret()? } else { secret() };
     let key = input.key(
         project.clone(),
         format!("key-{}", uuid::Uuid::new_v4().simple()),
-        auth::fingerprint(&access),
+        auth::key_verifier(&access).ok_or_else(ApiError::internal)?,
+        expires_at_ms,
+        ephemeral,
+        name,
     )?;
     app.store
         .control(true, move |c| {
@@ -447,6 +639,19 @@ async fn create_credential(
             ))?;
             let mut result = public_key(&key);
             result["api_key"] = json!(access);
+            if is_maas {
+                let issued = access.strip_prefix("sk-oai-").unwrap_or_default();
+                let prefix = issued.split_once('_').map(|(id, _)| {
+                    format!("sk-oai-{}...", id.chars().take(12).collect::<String>())
+                });
+                result["token_type"] = json!("maas");
+                result["keyPrefix"] = json!(prefix);
+                result["expiresAt"] = json!(
+                    chrono::DateTime::from_timestamp_millis(key.expires_at_ms.unwrap_or_default())
+                        .map(|date| date.to_rfc3339())
+                );
+                result["ephemeral"] = json!(key.ephemeral);
+            }
             Ok((StatusCode::CREATED, Json(result)))
         })
         .await
@@ -454,12 +659,21 @@ async fn create_credential(
 async fn update_credential(
     State(app): State<App>,
     Path((project, id)): Path<(String, String)>,
-    Json(input): Json<CredentialInput>,
+    Json(mut input): Json<CredentialInput>,
 ) -> Result<Json<Value>, ApiError> {
     app.store
         .control(true, move |c| {
             let old = get_key(c, &project, &id)?;
-            let key = input.key(project, id.clone(), old.sha256)?;
+            // An older admin client omitting this field must not reopen direct access.
+            input.exchange_only |= old.exchange_only;
+            let key = input.key(
+                project,
+                id.clone(),
+                old.sha256,
+                old.expires_at_ms,
+                old.ephemeral,
+                old.name,
+            )?;
             sql(c.execute(
                 "UPDATE project_credentials SET payload=?2 WHERE key_id=?1",
                 params![id, encode(&key)],
@@ -475,14 +689,23 @@ async fn rotate_credential(
     app.store
         .control(true, move |c| {
             let mut key = get_key(c, &project, &id)?;
-            let access = secret();
-            key.sha256 = auth::fingerprint(&access);
+            let is_maas = key.expires_at_ms.is_some();
+            let access = if is_maas { maas_secret()? } else { secret() };
+            key.sha256 = auth::key_verifier(&access).ok_or_else(ApiError::internal)?;
             sql(c.execute(
                 "UPDATE project_credentials SET payload=?2 WHERE key_id=?1",
                 params![id, encode(&key)],
             ))?;
             let mut result = public_key(&key);
             result["api_key"] = json!(access);
+            if is_maas {
+                result["token_type"] = json!("maas");
+                result["expiresAt"] = json!(
+                    chrono::DateTime::from_timestamp_millis(key.expires_at_ms.unwrap_or_default())
+                        .map(|date| date.to_rfc3339())
+                );
+                result["ephemeral"] = json!(key.ephemeral);
+            }
             Ok(Json(result))
         })
         .await
@@ -588,12 +811,30 @@ pub(crate) async fn backend_for_key(app: &App, key: &auth::Key) -> Result<Select
     })
 }
 pub(crate) async fn authenticate(
-    mut app: App,
+    app: App,
     headers: &HeaderMap,
 ) -> Result<(App, auth::Key, auth::Identity), ApiError> {
+    authenticate_for(app, headers, false).await
+}
+
+pub(crate) async fn authenticate_exchange(
+    app: App,
+    headers: &HeaderMap,
+) -> Result<(App, auth::Key, auth::Identity), ApiError> {
+    authenticate_for(app, headers, true).await
+}
+
+async fn authenticate_for(
+    mut app: App,
+    headers: &HeaderMap,
+    exchange: bool,
+) -> Result<(App, auth::Key, auth::Identity), ApiError> {
     let registry = crate::models::registry(&app).await?;
-    let (key, mut identity) =
-        auth::authenticate_key(headers, &registry, "", app.mock_adc.as_deref())?;
+    let (key, mut identity) = if exchange {
+        auth::authenticate_exchange_key(headers, &registry, app.mock_adc.as_deref())?
+    } else {
+        auth::authenticate_key(headers, &registry, "", app.mock_adc.as_deref())?
+    };
     let selection = backend_for_key(&app, key).await?;
     app.backend = selection.backend;
     identity.upstream_profile = selection.profile_id;
@@ -779,6 +1020,389 @@ mod tests {
     }
     fn messages() -> Value {
         json!({"model":"claude-fixture","max_tokens":16,"messages":[{"role":"user","content":"private_project_prompt"}]})
+    }
+    #[tokio::test]
+    async fn telemetry_key_inventory_includes_bootstrap_keys_and_filters_shared_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        let admin = crate::admin(app.clone());
+        let inference = crate::inference(app.clone());
+        let base = format!("/api/private/v1/projects/{DEFAULT_PROJECT}");
+        let path = format!("{base}/telemetry/keys");
+        assert_eq!(
+            call(admin.clone(), "GET", &path, "legacy-secret", None)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(inference.clone(), "GET", &path, "admin", None).await.0,
+            StatusCode::NOT_FOUND
+        );
+        let mut input = grants("shared-client");
+        input["mock_adc"] = json!(false);
+        let (status, anthropic) = call(
+            admin.clone(),
+            "POST",
+            &format!("{base}/credentials"),
+            "admin",
+            Some(input.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        input["token_type"] = json!("maas");
+        input["name"] = json!("MaaS test");
+        let (status, maas) = call(
+            admin.clone(),
+            "POST",
+            &format!("{base}/credentials"),
+            "admin",
+            Some(input),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let mut input = grants("vertex-client");
+        input["exchange_only"] = json!(true);
+        let (status, vertex) = call(
+            admin.clone(),
+            "POST",
+            &format!("{base}/credentials"),
+            "admin",
+            Some(input),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        for issued in [&anthropic, &anthropic, &maas] {
+            assert_eq!(
+                call(
+                    inference.clone(),
+                    "POST",
+                    "/v1/messages",
+                    issued["api_key"].as_str().unwrap(),
+                    Some(messages())
+                )
+                .await
+                .0,
+                StatusCode::OK
+            );
+        }
+        app.store.flush().await;
+        for (issued, count) in [(&anthropic, 2), (&maas, 1)] {
+            let key_id = issued["key_id"].as_str().unwrap();
+            let (status, requests) = call(
+                admin.clone(),
+                "GET",
+                &format!("{base}/telemetry/requests?key_id={key_id}"),
+                "admin",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let items = requests["items"].as_array().unwrap();
+            assert_eq!(items.len(), count);
+            assert!(
+                items
+                    .iter()
+                    .all(|item| item["key_id"] == key_id && item["client_id"] == "shared-client")
+            );
+            let (_, summary) = call(
+                admin.clone(),
+                "GET",
+                &format!("{base}/telemetry/summary?key_id={key_id}"),
+                "admin",
+                None,
+            )
+            .await;
+            assert_eq!(summary["generation_tokens"]["output_tokens"], count * 3);
+        }
+        let mut items = Vec::new();
+        let mut cursor = String::new();
+        loop {
+            let (status, page) = call(
+                admin.clone(),
+                "GET",
+                &format!("{path}?limit=1{cursor}"),
+                "admin",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(page["items"].as_array().unwrap().len(), 1);
+            items.extend(page["items"].as_array().unwrap().clone());
+            if let Some(after) = page["next_after_id"].as_str() {
+                cursor = format!("&after_id={after}");
+            } else {
+                break;
+            }
+        }
+        assert_eq!(items.len(), 4);
+        assert!(
+            items
+                .iter()
+                .all(|item| item["project_id"] == DEFAULT_PROJECT)
+        );
+        for (key_id, kind) in [
+            ("legacy-key", "legacy"),
+            (anthropic["key_id"].as_str().unwrap(), "anthropic"),
+            (maas["key_id"].as_str().unwrap(), "maas"),
+            (vertex["key_id"].as_str().unwrap(), "vertex"),
+        ] {
+            assert_eq!(
+                items.iter().find(|item| item["key_id"] == key_id).unwrap()["token_type"],
+                kind
+            );
+        }
+        for item in &items {
+            assert!(item.get("api_key").is_none() && item.get("sha256").is_none());
+        }
+        let serialized = json!(items).to_string();
+        assert!(!serialized.contains(&auth::fingerprint("legacy-secret")));
+        for issued in [&anthropic, &maas, &vertex] {
+            assert!(!serialized.contains(issued["api_key"].as_str().unwrap()));
+        }
+        // Disabled projects still expose identities for historical telemetry.
+        assert_eq!(
+            call(
+                admin.clone(),
+                "PUT",
+                &base,
+                "admin",
+                Some(
+                    json!({"project_id":DEFAULT_PROJECT,"display_name":"disabled","enabled":false})
+                )
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let (status, inventory) = call(admin.clone(), "GET", &path, "admin", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(inventory["items"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            call(
+                admin.clone(),
+                "GET",
+                &format!("{path}?limit=0"),
+                "admin",
+                None
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(
+                admin,
+                "GET",
+                "/api/private/v1/projects/unknown/telemetry/keys",
+                "admin",
+                None
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn workload_keys_require_exchange_and_keep_restrictions_after_edits_and_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        let admin = crate::admin(app.clone());
+        let inference = crate::inference(app.clone());
+        let path = format!("/api/private/v1/projects/{DEFAULT_PROJECT}/credentials");
+        let mut input = grants("vertex-client");
+        input["exchange_only"] = json!(true);
+        input["catalog_models"] = json!(false);
+        input["models"] = json!([]);
+        input["mock_adc"] = json!(false);
+        assert_eq!(
+            call(admin.clone(), "POST", &path, "admin", Some(input.clone()))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        input["mock_adc"] = json!(true);
+        let (status, issued) =
+            call(admin.clone(), "POST", &path, "admin", Some(input.clone())).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(issued["exchange_only"], true);
+        let key = issued["api_key"].as_str().unwrap();
+        let credential_path = format!("{path}/{}", issued["key_id"].as_str().unwrap());
+        let vertex = format!(
+            "/v1/projects/{DEFAULT_PROJECT}/locations/us-east5/publishers/anthropic/models/claude-fixture:rawPredict"
+        );
+        let vertex_body = json!({"max_tokens":16,"anthropic_version":"vertex-2023-10-16","messages":[{"role":"user","content":"test"}]});
+        for (method, route, body) in [
+            ("GET", "/v1/models", None),
+            ("POST", "/v1/messages", Some(messages())),
+            ("POST", vertex.as_str(), Some(vertex_body.clone())),
+        ] {
+            assert_eq!(
+                call(inference.clone(), method, route, key, body).await.0,
+                StatusCode::FORBIDDEN
+            );
+        }
+        let response = inference
+            .clone()
+            .oneshot(
+                Request::post("/v1/messages")
+                    .header("x-api-key", key)
+                    .header("anthropic-version", "2023-06-01")
+                    .body(Body::from(messages().to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let (status, exchanged) = token(&app, key, DEFAULT_PROJECT).await;
+        assert_eq!(status, StatusCode::OK);
+        let access = exchanged["access_token"].as_str().unwrap();
+        assert_eq!(
+            call(
+                inference.clone(),
+                "POST",
+                &vertex,
+                access,
+                Some(vertex_body.clone())
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        // The Claude Vertex wrapper also discovers models through the catalog route.
+        let (status, catalog) = call(
+            inference.clone(),
+            "GET",
+            "/v1/models?client_api=vertex",
+            access,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(catalog["data"].as_array().unwrap().len(), 1);
+        input.as_object_mut().unwrap().remove("exchange_only");
+        let (status, edited) =
+            call(admin.clone(), "PUT", &credential_path, "admin", Some(input)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(edited["exchange_only"], true);
+        assert_eq!(
+            call(
+                inference.clone(),
+                "POST",
+                &vertex,
+                key,
+                Some(vertex_body.clone())
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, rotated) = call(
+            admin.clone(),
+            "POST",
+            &format!("{credential_path}/rotate"),
+            "admin",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(rotated["exchange_only"], true);
+        assert_eq!(
+            token(&app, key, DEFAULT_PROJECT).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                inference.clone(),
+                "POST",
+                &vertex,
+                access,
+                Some(vertex_body.clone())
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let replacement = rotated["api_key"].as_str().unwrap();
+        assert_eq!(
+            call(
+                inference.clone(),
+                "POST",
+                &vertex,
+                replacement,
+                Some(vertex_body.clone())
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, exchanged) = token(&app, replacement, DEFAULT_PROJECT).await;
+        assert_eq!(status, StatusCode::OK);
+        let access = exchanged["access_token"].as_str().unwrap();
+        assert_eq!(
+            call(
+                inference.clone(),
+                "POST",
+                &vertex,
+                access,
+                Some(vertex_body.clone())
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(admin, "DELETE", &credential_path, "admin", None)
+                .await
+                .0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(inference, "POST", &vertex, access, Some(vertex_body))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn maas_key_format_and_lifetimes_match_issuer_limits() {
+        let credential = maas_secret().unwrap();
+        let (id, secret) = credential
+            .strip_prefix("sk-oai-")
+            .unwrap()
+            .split_once('_')
+            .unwrap();
+        assert!(id.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+        assert!(secret.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+        assert_eq!(auth::key_verifier(&credential).unwrap().len(), 64);
+        assert_eq!(parse_duration("2h30m"), Some(Duration::from_secs(9000)));
+        assert_eq!(parse_duration("30d"), Some(Duration::from_secs(30 * 86400)));
+        assert_eq!(parse_duration("-1h"), None);
+
+        let regular = CredentialInput {
+            client_id: "client".into(),
+            token_type: Some("maas".into()),
+            name: Some("regular".into()),
+            expires_in: None,
+            ephemeral: false,
+            models: vec![],
+            backends: vec![],
+            catalog_models: false,
+            vertex_catalog_models: false,
+            mock_adc: false,
+            exchange_only: false,
+        };
+        let expires = maas_expiration(&regular).unwrap();
+        assert!(expires - chrono::Utc::now().timestamp_millis() <= 90 * 86400 * 1000);
+        let ephemeral = CredentialInput {
+            name: None,
+            ephemeral: true,
+            ..regular
+        };
+        let expires = maas_expiration(&ephemeral).unwrap();
+        assert!(expires - chrono::Utc::now().timestamp_millis() <= 3600 * 1000);
     }
     #[tokio::test]
     async fn projects_crud_routing_revocation_and_persistent_telemetry() {

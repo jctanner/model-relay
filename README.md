@@ -491,6 +491,35 @@ profiles. Real provider credentials remain in the proxy. See
 
 ## Telemetry REST
 
+The admin listener also serves a browser console at `/admin/`. Get the URL for
+your running session with:
+
+```bash
+VERTEX_SHIM_SESSION=liveoauth ./scripts/dev.sh admin-url
+```
+
+Enter the admin key from `.state/<session>/admin-api-key` in the connect form.
+The console includes filtered telemetry, token/context usage, request details,
+project editing, and credential issuance, grant editing, rotation, and revocation.
+The **Project / API key** telemetry selector groups each project's keys by
+identity, including MaaS, Anthropic, Vertex workload, and file-registry keys.
+Select a whole project or one key, then apply the filters. Key selections use
+both `project_id` and `key_id`, so clients sharing a name remain distinct.
+It uses the existing private API; the key stays in browser memory and is cleared
+on disconnect or reload. Newly issued credentials are shown once for copying or
+downloading. UI assets are embedded in the relay binary, with no separate UI
+container, dependency installation, or external asset requests.
+
+The token form inherits **Anthropic OAuth** from the project's upstream profile.
+Anthropic and MaaS API keys authenticate directly; Vertex workload keys must
+first exchange for a Google bearer token. The form sets these permissions
+automatically and offers one catalog-access checkbox. Existing keys retain
+their current authentication permissions.
+
+Telemetry totals cover the pages loaded in the console; use **Load more requests**
+to include further pages. API-key token counts and model context occupancy are
+distinct from the upstream account's subscription quota, which is not collected.
+
 Admin requests require the separate bearer key stored in `.state/dev/admin-api-key`.
 The private namespace is served only on the admin listener:
 

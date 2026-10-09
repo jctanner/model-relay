@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>model-relay · Admin</title>
+  <link rel="stylesheet" href="/admin/admin.css">
+  <script src="/admin/admin.js" defer></script>
+</head>
+<body>
+  <section id="connect-screen" class="connect-screen">
+    <div class="connect-card">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">↗</span><span>model-relay<span class="brand-sub">ADMIN CONSOLE</span></span></div>
+      <p class="eyebrow">YOUR INFERENCE, IN VIEW</p>
+      <h1>A clear view of your relay.</h1>
+      <p class="muted">Explore usage, manage projects, and issue credentials from one place.</p>
+      <form id="connect-form">
+        <label for="admin-key">Admin API key</label>
+        <input id="admin-key" name="admin-key" type="password" autocomplete="off" required placeholder="Enter your admin key" spellcheck="false">
+        <p class="hint">Use your session’s <code>admin-api-key</code> file. The key stays in this tab’s memory and is cleared when you disconnect or reload.</p>
+        <p id="connect-error" class="form-error" role="alert"></p>
+        <button class="primary full" type="submit">Connect to relay <span aria-hidden="true">→</span></button>
+      </form>
+      <div class="connect-origin"><span class="status-dot"></span><span id="origin"></span></div>
+    </div>
+  </section>
+
+  <div id="app" class="shell" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="/admin/"><span class="brand-mark" aria-hidden="true">↗</span><span>model-relay<span class="brand-sub">ADMIN CONSOLE</span></span></a>
+      <div class="nav-label">WORKSPACE</div>
+      <nav aria-label="Admin views">
+        <button class="nav-item active" data-view="telemetry" type="button" aria-current="page"><span aria-hidden="true">▥</span> Telemetry</button>
+        <button class="nav-item" data-view="projects" type="button"><span aria-hidden="true">▦</span> Projects <span id="project-count" class="nav-count">0</span></button>
+        <button class="nav-item" data-view="tokens" type="button"><span aria-hidden="true">⚿</span> Tokens</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="connection-status"><span id="health-dot" class="status-dot"></span><span id="health-text">Connected</span></div>
+        <p id="profile-count" class="hint">Loading upstream profiles…</p>
+        <button id="disconnect" class="quiet full" type="button">Disconnect</button>
+      </div>
+    </aside>
+    <main>
+      <header class="topbar"><span class="topbar-label">RELAY CONTROL PLANE</span><div><span id="updated-at" class="muted"></span><button id="refresh" class="quiet" type="button">↻ Refresh</button></div></header>
+      <div id="notice" role="status" class="notice" hidden></div>
+
+      <section id="telemetry-view" class="view">
+        <div class="page-heading"><div><p class="eyebrow">OBSERVABILITY</p><h1>Telemetry</h1><p class="muted">Requests, token consumption, and context usage across your clients.</p></div><button id="export-telemetry" class="secondary" type="button">↓ Export loaded requests</button></div>
+        <form id="filters" class="filters panel">
+          <label>Project / API key<select id="telemetry-scope"><option value="">All projects and keys</option></select></label>
+          <label>Client<input name="client_id" placeholder="All clients"></label>
+          <label>Model<input name="model" placeholder="All models"></label>
+          <label>From<input id="filter-from" name="from" type="datetime-local"></label>
+          <label>To<input name="to" type="datetime-local"></label>
+          <button class="primary" type="submit">Apply filters</button>
+        </form>
+        <div class="stats">
+          <article class="stat panel"><span>Loaded requests</span><strong id="stat-requests">—</strong><small id="stat-request-note">Current filtered selection</small></article>
+          <article class="stat panel"><span>Input tokens</span><strong id="stat-input">—</strong><small>Uncached generation input</small></article>
+          <article class="stat panel"><span>Output tokens</span><strong id="stat-output">—</strong><small>Generation output</small></article>
+          <article class="stat panel"><span>Cache tokens</span><strong id="stat-cache">—</strong><small id="stat-cache-note">Read + creation</small></article>
+        </div>
+        <div class="telemetry-secondary">
+          <article class="panel"><div class="panel-heading"><h2>Usage by model</h2><span class="hint">Generation tokens · loaded requests</span></div><div id="model-bars" class="model-bars"></div></article>
+          <article class="panel"><div class="panel-heading"><h2>Request health</h2></div><dl id="request-health" class="health-list"></dl><p class="hint card-note">These are relay-observed token totals. Subscription quota snapshots are not collected yet.</p></article>
+        </div>
+        <article class="panel table-panel">
+          <div class="panel-heading"><h2>Requests</h2><span id="request-scope" class="hint">Loading requests…</span></div>
+          <div class="table-scroll"><table><thead><tr><th>Time</th><th>Project / client</th><th>Model</th><th>Tokens in / out</th><th>Context</th><th>Latency</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="request-rows"></tbody></table></div>
+          <div class="table-footer"><span id="pagination-note" class="hint"></span><button id="load-more" class="secondary" type="button" hidden>Load more requests</button></div>
+        </article>
+      </section>
+
+      <section id="projects-view" class="view" hidden>
+        <div class="page-heading"><div><p class="eyebrow">CLIENT ISOLATION</p><h1>Projects</h1><p class="muted">Bind client credentials to a project and an installed upstream profile.</p></div><button id="add-project" class="primary" type="button">+ Add project</button></div>
+        <article class="panel table-panel"><div class="panel-heading"><h2>Your projects</h2><span id="projects-note" class="hint"></span></div><div class="table-scroll"><table><thead><tr><th>Project</th><th>Upstream profile</th><th>Labels</th><th>Status</th><th>Actions</th></tr></thead><tbody id="project-rows"></tbody></table></div></article>
+        <article class="panel profiles-panel"><div class="panel-heading"><h2>Installed upstream profiles</h2><span class="hint">Provider credentials are configured on the server</span></div><div id="profile-cards" class="profile-cards"></div></article>
+      </section>
+
+      <section id="tokens-view" class="view" hidden>
+        <div class="page-heading"><div><p class="eyebrow">CLIENT ACCESS</p><h1>Tokens</h1><p class="muted">Issue project credentials, inspect grants, and revoke access.</p></div><button id="issue-token" class="primary" type="button">+ Issue token</button></div>
+        <div class="token-toolbar"><label>Project<select id="token-project"></select></label><p id="token-project-note" class="muted"></p></div>
+        <article class="panel table-panel"><div class="panel-heading"><h2>Managed credentials</h2><span id="tokens-note" class="hint"></span></div><div class="table-scroll"><table><thead><tr><th>Name / client</th><th>Type</th><th>Model access</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead><tbody id="token-rows"></tbody></table></div></article>
+        <p class="hint">This view lists credentials issued through the admin API. Bootstrap keys in the file registry remain managed on the server.</p>
+      </section>
+      <footer class="page-footer">model-relay<span>Private admin API · Same-origin console</span></footer>
+    </main>
+  </div>
+
+  <dialog id="project-dialog">
+    <form id="project-form">
+      <div class="dialog-heading"><div><p class="eyebrow">PROJECT</p><h2 id="project-dialog-title">Add project</h2></div><button class="icon-button" type="button" data-close="project-dialog" aria-label="Close project editor">×</button></div>
+      <label>Project ID<input id="project-id" required maxlength="63" pattern="[a-z][a-z0-9\-]*[a-z0-9]|[a-z]" placeholder="agent-alpha"></label>
+      <label>Display name<input id="project-name" required maxlength="200" placeholder="Alpha agent"></label>
+      <label>Upstream profile<select id="project-profile"></select></label>
+      <label class="checkbox"><input id="project-enabled" type="checkbox" checked> Enabled</label>
+      <label>Labels <span class="optional">optional JSON object</span><textarea id="project-labels" rows="3" spellcheck="false" placeholder='{"team":"platform"}'></textarea></label>
+      <p id="project-form-error" class="form-error" role="alert"></p>
+      <div class="dialog-footer"><button class="secondary" type="button" data-close="project-dialog">Cancel</button><button class="primary" type="submit">Save project</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="token-dialog" class="wide-dialog">
+    <form id="token-form">
+      <div class="dialog-heading"><div><p class="eyebrow">CREDENTIAL</p><h2 id="token-dialog-title">Issue token</h2></div><button class="icon-button" type="button" data-close="token-dialog" aria-label="Close token editor">×</button></div>
+      <p id="token-target" class="muted"></p>
+      <div id="token-issue-fields">
+        <label>Token type<select id="token-type"><option value="maas">MaaS API key · expiring</option><option value="anthropic">Anthropic API key</option><option value="vertex">Vertex workload key</option></select></label>
+        <div id="maas-fields"><label>Name<input id="token-name" maxlength="200" placeholder="Nightly batch"></label><div class="form-grid"><label>Expires in<input id="token-expiry" placeholder="90d" maxlength="32"></label><label class="checkbox align-end"><input id="token-ephemeral" type="checkbox"> Ephemeral · max 1 hour</label></div></div>
+      </div>
+      <label>Client ID<input id="token-client" required maxlength="128" pattern="[A-Za-z0-9._\-]+" placeholder="alpha-agent"></label>
+      <label>Backend<input id="token-backend" readonly value="Anthropic OAuth"><span class="hint">Inherited from the project’s upstream profile. Provider credentials stay on the relay.</span></label>
+      <p id="token-auth-flow" class="hint"></p>
+      <fieldset><legend>Model access</legend><label>Explicit model IDs <span class="optional">one per line or comma separated</span><textarea id="token-models" rows="2" spellcheck="false" placeholder="claude-opus-4-6"></textarea></label><label class="checkbox"><input id="token-catalog" type="checkbox"> Allow all available models</label></fieldset>
+      <p id="token-form-note" class="hint"></p><p id="token-form-error" class="form-error" role="alert"></p>
+      <div class="dialog-footer"><button class="secondary" type="button" data-close="token-dialog">Cancel</button><button id="token-submit" class="primary" type="submit">Issue token</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="secret-dialog">
+    <div class="dialog-heading"><div><p class="eyebrow">CREDENTIAL CREATED</p><h2>Save your token</h2></div><button class="icon-button" type="button" data-close="secret-dialog" aria-label="Close token secret">×</button></div>
+    <p class="muted">This is the only time the token can be retrieved. Store it before closing this dialog.</p>
+    <label for="issued-secret">API token</label><textarea id="issued-secret" readonly rows="3" autocomplete="off" spellcheck="false"></textarea>
+    <p id="secret-details" class="hint"></p><p id="secret-status" class="hint" role="status"></p>
+    <div class="secret-actions"><button id="copy-secret" class="secondary" type="button">Copy token</button><button id="download-secret" class="secondary" type="button">↓ Download token</button></div>
+    <div class="dialog-footer"><button class="primary" type="button" data-close="secret-dialog">I’ve saved it</button></div>
+  </dialog>
+
+  <dialog id="confirm-dialog">
+    <div class="dialog-heading"><h2 id="confirm-title">Confirm action</h2></div><p id="confirm-message" class="muted"></p>
+    <div class="dialog-footer"><button class="secondary" type="button" data-close="confirm-dialog">Cancel</button><button id="confirm-action" class="danger" type="button">Confirm</button></div>
+  </dialog>
+
+  <dialog id="request-dialog" class="detail-dialog">
+    <div class="dialog-heading"><div><p class="eyebrow">TELEMETRY</p><h2>Request details</h2></div><button class="icon-button" type="button" data-close="request-dialog" aria-label="Close request details">×</button></div>
+    <pre id="request-detail"></pre><details><summary>Usage events</summary><pre id="request-events"></pre><button id="more-events" class="secondary" type="button" hidden>Load more events</button></details>
+  </dialog>
+</body>
+</html>

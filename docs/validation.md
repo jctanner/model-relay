@@ -354,3 +354,88 @@ The existing host watcher still manages only its original default mirror.
 Projects/grants are dynamic REST resources; installing additional upstream
 profile mounts requires stack recreation, and changing installed profile
 configuration requires a proxy process restart.
+
+## Browser admin console, 2026-10-09
+
+The console was exercised against a disposable rootless Podman mock relay,
+with an internal network and synthetic credentials. Browser checks covered
+login rejection and reconnection, project creation/editing/deletion, safe text
+rendering of HTML-looking labels, all three credential types, ephemeral MaaS
+issuance, grant editing, rotation, and revocation. A rotated MaaS key successfully
+authenticated an inference request and was rejected after revocation; inference
+credentials could not read the admin API.
+
+Telemetry checks loaded more than 100 requests across cursor pages, verified
+that generation token totals exclude counting requests, filtered by project,
+opened usage events, and downloaded the loaded telemetry as JSON. Desktop and
+390-pixel mobile layouts were checked; disconnect and reload clear the admin
+key, issued-secret field, and displayed data. No localStorage or sessionStorage
+entries were created. The final browser checks reported no JavaScript errors.
+
+`scripts/test.sh` passed all 18 Rust tests, formatting, and Clippy in Podman.
+The UI tests also verify browser response headers and that the page is served
+only on the admin listener while private data routes retain bearer protection.
+JavaScript syntax, shell syntax, and diff whitespace checks passed.
+
+Artifacts are under ignored `.state/admin-ui-validation/`, including
+`rust-checks.log` and `telemetry-desktop.png`. No live inference or upstream
+usage calls were used for these checks.
+
+The running `liveoauth` proxy was then rebuilt and restarted in place. Its
+HTML/CSS/JavaScript responses match the checked source byte-for-byte; unauthenticated
+private API access returns 401, the UI is absent from the inference listener,
+and storage health reports no pending writes, dropped records, or errors.
+Evidence: `.state/admin-ui-validation/live-verification.json` and
+`live-upgrade.log`.
+
+## Token form simplification, 2026-10-09
+
+The token form now inherits the project's upstream provider, showing Anthropic
+OAuth for the live session. Backend grant and Google-exchange checkboxes were
+removed. Anthropic and MaaS API keys receive direct API access; new Vertex
+workload keys receive exchange-only access. One model-catalog checkbox maps to
+the selected client interface. Existing credentials retain their auth grants.
+
+`./scripts/test.sh` passed 19 Rust tests, formatting, and Clippy with warnings
+denied. The new routing test covers raw workload-key rejection on Messages,
+Vertex, and discovery, successful Google exchange and Vertex catalog access,
+restriction preservation on PUT and rotation, and revocation of exchanged
+tokens. `node --check src/admin_ui/admin.js` and `git diff --check` passed.
+
+Browser checks against a disposable rootless Podman mock stack verified all
+three token types, their derived grants, direct-inference/exchange behavior,
+grant edits, unchanged MaaS expiration, and preservation of legacy combined
+permissions. The simplified dialog fit a 390-pixel viewport. No real upstream
+requests were needed. The temporary container and network were removed.
+
+The liveoauth proxy was rebuilt in its existing container and its process
+restarted. Served HTML/JS matched the workspace assets; private health reported
+zero storage errors and dropped records. The console remains at
+`http://127.0.0.1:44443/admin/`.
+
+## Telemetry project and key selector, 2026-10-09
+
+The telemetry selector now groups projects with their individual MaaS,
+Anthropic, Vertex workload, and legacy combined keys. A read-only, paginated
+`/projects/{project}/telemetry/keys` inventory includes both SQLite-managed
+credentials and file-registry bootstrap keys without secrets or verifiers.
+Key selections apply both project and key filters. Inventory loading uses at
+most four concurrent project requests; issuance, edits, revocation, and refresh
+update the selector. Revoking a selected key retains its historical scope.
+
+All 20 Rust tests passed through `./scripts/test.sh`, including inventory
+pagination, authentication/listener separation, bootstrap and managed key
+types, disabled-project identities, and telemetry isolation between two keys
+sharing a client ID. Formatting, Clippy, JavaScript syntax, and diff checks
+passed.
+
+Browser verification used a disposable rootless Podman mock stack with two
+projects and 105 requests. It verified 101 Anthropic-key requests across two
+pages, two MaaS-key requests sharing that client ID, project/all-key scope
+changes, bootstrap key selection, key-scoped totals and export data, refresh,
+historical usage after revocation, and newly issued keys becoming selectable.
+The filters fit desktop and 390-pixel mobile viewports. Live assets matched
+workspace HTML/JS after rebuilding and restarting the liveoauth proxy process;
+the new live inventory exposed both bootstrap identities with no secret fields,
+disconnect cleared the selector, and storage health reported zero errors or
+dropped records. The temporary test container and network were removed.

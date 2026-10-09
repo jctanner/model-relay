@@ -239,7 +239,7 @@ case ${1:-help} in
         ;;
     restart)
         # Compile first. A failed build never signals/replaces the running binary.
-        podman exec "$proxy" bash -c 'export SHIM_BUILD_ID=$(sha256sum Cargo.toml Cargo.lock src/*.rs | sha256sum | cut -d " " -f1); cargo build --locked --offline && install /build/target/debug/vertex-shim /build/bin/vertex-shim.next && mv /build/bin/vertex-shim.next /build/bin/vertex-shim && touch /run/vertex-shim/restart'
+        podman exec "$proxy" bash -c 'export SHIM_BUILD_ID=$(sha256sum Cargo.toml Cargo.lock src/*.rs src/admin_ui/* | sha256sum | cut -d " " -f1); cargo build --locked --offline && install /build/target/debug/vertex-shim /build/bin/vertex-shim.next && mv /build/bin/vertex-shim.next /build/bin/vertex-shim && touch /run/vertex-shim/restart'
         sleep 1
         podman exec "$proxy" curl -fsS http://127.0.0.1:8080/health
         ;;
@@ -254,8 +254,12 @@ case ${1:-help} in
     status)
         podman ps --all --filter "label=io.vertex-shim.session=${session}" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
         ;;
+    admin-url)
+        address=$(podman port "$proxy" 8081/tcp)
+        printf 'http://%s/admin/\n' "$address"
+        ;;
     help|--help|-h)
-        echo "Usage: dev.sh {build-images|init|start|exec proxy|client|anthropic-client|vertex-client COMMAND...|restart|telemetry [requests|summary|export]|status|stop}"
+        echo "Usage: dev.sh {build-images|init|start|exec proxy|client|anthropic-client|vertex-client COMMAND...|restart|admin-url|telemetry [requests|summary|export]|status|stop}"
         ;;
     *) echo "Unknown command: $1" >&2; exit 2;;
 esac

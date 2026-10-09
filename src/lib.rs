@@ -1,3 +1,4 @@
+pub mod admin_ui;
 pub mod auth;
 pub mod backend;
 pub mod credentials;
@@ -137,6 +138,7 @@ pub fn admin(app: App) -> Router {
             app.clone(),
             projects::protect,
         ))
+        .merge(admin_ui::routes())
         .with_state(app)
 }
 
@@ -698,6 +700,15 @@ mod tests {
         assert_eq!(value["usage"]["output_tokens"], 3);
         assert_eq!(
             router
+                .clone()
+                .oneshot(Request::get("/admin/").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            router
                 .oneshot(
                     Request::get("/api/private/v1/telemetry/requests")
                         .body(Body::empty())
@@ -710,6 +721,15 @@ mod tests {
         );
         store.flush().await;
         let admin = admin(app);
+        assert_eq!(
+            admin
+                .clone()
+                .oneshot(Request::get("/admin/").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
         assert_eq!(
             admin
                 .clone()

@@ -418,7 +418,7 @@ async fn exchange(
             .parse()
             .map_err(|_| ApiError::unauthorized())?,
     );
-    let (app, key, identity) = crate::projects::authenticate(app, &headers).await?;
+    let (app, key, identity) = crate::projects::authenticate_exchange(app, &headers).await?;
     if input.audience != audience(&identity.project_id) {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
