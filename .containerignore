@@ -1,0 +1,16 @@
+# A narrow client build context; never send personal state or the reference
+# context-inspector checkout to the container builder.
+**
+!containers/
+!containers/Containerfile.claude
+!containers/Containerfile.dev
+!containers/Containerfile.runtime
+!scripts/
+!scripts/container/
+!scripts/container/claude-proxy.sh
+!scripts/container/proxy-service.sh
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!src/
+!src/**

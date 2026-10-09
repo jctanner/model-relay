@@ -1,0 +1,86 @@
+# Runtime state: OAuth mirrors, client/admin keys, project credentials,
+# telemetry backups, native transcripts, test artifacts, and session config.
+.state/
+client-work/
+
+# Local reference checkouts and the planning document with internal references.
+/context-inspector
+/models-as-a-service/
+/tmp/
+/vertex-shim-local-vertex-simulator.md
+
+# Server-owned credential directories and personal CLI/cloud state.
+/auth/
+/oauth/
+/upstreams/
+secrets/
+credentials/
+.claude/
+.claude.json*
+.codex/
+.config/gcloud/
+.gcloud/
+.aws/
+.ssh/
+.gnupg/
+
+# Environment files, including local variants and backups. Examples must
+# contain placeholders only before being explicitly included.
+.env
+.env.*
+*.env
+*.env.*
+!.env.example
+
+# Credentials copied outside the usual state directories.
+.credentials.json*
+credentials.json*
+application_default_credentials.json*
+service-account*.json*
+service_account*.json*
+keys.json*
+profiles.json*
+*-credential.json*
+*-credentials.json*
+api-key
+api-key.*
+*-key
+*-key.*
+token
+token.json*
+token.txt
+*-token
+*-token.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.keystore
+
+# Telemetry, database sidecars/backups, logs, and transcript exports.
+*.sqlite*
+*.db
+*.db-*
+*.db.*
+*.log
+*.log.*
+*.jsonl
+*.ndjson
+
+# Build output and local Python environments/caches.
+target/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editor/OS scratch files.
+*.swp
+*.swo
+*~
+.DS_Store
+
+tmp/*

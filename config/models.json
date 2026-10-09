@@ -1,0 +1,10 @@
+{
+  "claude-haiku-5-5": {
+    "window_tokens": null,
+    "upstream_model": "claude-haiku-5-5"
+  },
+  "claude-sonnet-4-5@20250929": {
+    "window_tokens": null,
+    "upstream_model": "claude-sonnet-4-5-20250929"
+  }
+}

@@ -1,0 +1,2 @@
+proxy: ./scripts/dev.sh service proxy
+client: ./scripts/dev.sh service client

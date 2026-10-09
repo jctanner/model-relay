@@ -1,0 +1,20 @@
+FROM docker.io/library/rust@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f
+RUN apt-get update && apt-get install -y --no-install-recommends tini curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup component add rustfmt clippy
+WORKDIR /opt/source
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+# Fetch the dependency graph with a minimal target. Source edits do not change
+# this image layer; the real source is mounted at runtime.
+RUN mkdir src && printf 'fn main() {}\n' > src/main.rs && cargo fetch --locked
+# Seed the writable runtime cache from image-prepared, locked dependencies.
+RUN cp -a /usr/local/cargo/registry /opt/cargo-registry \
+    && mkdir -p /cargo /build /data /run/vertex-shim /work \
+    && chown -R 1000:1000 /cargo /build /data /run/vertex-shim /work
+COPY scripts/container/proxy-service.sh /usr/local/bin/proxy-service
+RUN chmod 0755 /usr/local/bin/proxy-service
+ENV CARGO_HOME=/cargo CARGO_TARGET_DIR=/build/target
+USER 1000:1000
+WORKDIR /work
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/usr/local/bin/proxy-service"]

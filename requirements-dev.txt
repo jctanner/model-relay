@@ -1,0 +1,2 @@
+# Host-side development supervision; the proxy itself is Rust.
+honcho==2.0.0

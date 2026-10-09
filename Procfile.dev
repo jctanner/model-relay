@@ -1,0 +1,3 @@
+proxy: ./scripts/dev.sh service proxy
+client: ./scripts/dev.sh service client
+vertex: ./scripts/dev.sh service vertex-client

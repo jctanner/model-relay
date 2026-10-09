@@ -1,0 +1,43 @@
+# Override with a digest-qualified reference for a frozen build.
+ARG CLIENT_BASE_IMAGE=docker.io/library/debian@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+FROM ${CLIENT_BASE_IMAGE} AS installer
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash ca-certificates curl git jq ripgrep tini libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# No floating release channels: pass an exact version at build time.
+ARG CLAUDE_CODE_VERSION
+RUN bash -c '[[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' -- "${CLAUDE_CODE_VERSION}"
+# The installer is executed only during the container build. Install outside
+# the runtime HOME so mounting the client's state volume cannot hide the CLI.
+RUN HOME=/opt/claude-install bash -o pipefail -c \
+      'curl -fsSL https://claude.ai/install.sh | bash -s -- "$1"' \
+      -- "${CLAUDE_CODE_VERSION}" \
+    && install -m 0755 /opt/claude-install/.local/bin/claude /usr/local/bin/claude \
+    && test "$(claude --version)" = "${CLAUDE_CODE_VERSION} (Claude Code)" \
+    && rm -rf /opt/claude-install
+
+FROM installer AS client
+ARG CLAUDE_CODE_VERSION
+LABEL org.opencontainers.image.title="vertex-shim Claude Code client" \
+      org.opencontainers.image.version="${CLAUDE_CODE_VERSION}"
+RUN groupadd --gid 1000 claude && useradd --uid 1000 --gid 1000 --create-home claude \
+    && install -d -o claude -g claude /home/claude/.claude /work
+COPY scripts/container/claude-proxy.sh /usr/local/bin/claude-proxy
+RUN chmod 0755 /usr/local/bin/claude-proxy
+ENV HOME=/home/claude \
+    CLAUDE_CONFIG_DIR=/home/claude/.claude \
+    CLAUDE_CODE_USE_VERTEX=1 \
+    CLAUDE_CODE_SKIP_VERTEX_AUTH=1 \
+    ANTHROPIC_VERTEX_PROJECT_ID=vertex-shim-local \
+    CLOUD_ML_REGION=us-east5 \
+    ANTHROPIC_VERTEX_BASE_URL=http://vertex-shim:8080/v1 \
+    DISABLE_AUTOUPDATER=1 \
+    DISABLE_UPDATES=1 \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    DISABLE_TELEMETRY=1 \
+    DISABLE_ERROR_REPORTING=1
+USER 1000:1000
+WORKDIR /work
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["sleep", "infinity"]
