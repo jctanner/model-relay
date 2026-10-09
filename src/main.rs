@@ -82,9 +82,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if admin_key.is_empty() {
         return Err("Empty admin key".into());
     }
-    let store = Store::open(Path::new(
-        &env::var("SHIM_DB").unwrap_or_else(|_| "/data/telemetry.sqlite".into()),
-    ))?;
+    let db_path = env::var("SHIM_DB").unwrap_or_else(|_| "/data/telemetry.sqlite".into());
+    let store = Store::open(Path::new(&db_path))?;
     let mock_adc = if let Ok(key_id) = env::var("SHIM_MOCK_ADC_KEY_ID") {
         Some(Arc::new(MockAdc::new(
             key_id,
@@ -110,7 +109,39 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             upstreams.insert(id, profile.backend()?);
         }
     }
+    let accounts = vertex_shim::accounts::Manager::open(
+        store.clone(),
+        env::var("SHIM_ACCOUNTS_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                Path::new(&db_path)
+                    .parent()
+                    .unwrap_or(Path::new("/data"))
+                    .join("oauth-accounts")
+            }),
+        env::var("SHIM_CLAUDE_BIN")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                if Path::new("/build/bin/claude").exists() {
+                    "/build/bin/claude".into()
+                } else {
+                    "/usr/local/bin/claude".into()
+                }
+            }),
+        env::var("SHIM_MANAGED_UPSTREAM_BASE_URL")
+            .unwrap_or_else(|_| "https://api.anthropic.com".into()),
+        env::var("SHIM_OAUTH_TOKEN_URL")
+            .unwrap_or_else(|_| "https://platform.claude.com/v1/oauth/token".into()),
+        env::var("SHIM_UPSTREAM_SYNTHETIC").is_ok_and(|v| v == "true"),
+    )
+    .await?;
+    for id in upstreams.keys() {
+        if accounts.contains_profile(id) {
+            return Err("Upstream profile ID collision".into());
+        }
+    }
     let app = App {
+        accounts: Some(accounts.clone()),
         upstreams: Arc::new(upstreams),
         mock_adc,
         backend,
@@ -149,6 +180,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }),
     );
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let account_worker = accounts.background(stop_rx.clone());
     let shutdown = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
         while !*rx.borrow() {
             if rx.changed().await.is_err() {
@@ -195,7 +227,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         let _ = stop_tx.send(true);
     };
-    let (a, b, c, ()) = tokio::join!(listener_a, listener_b, listener_c, signal);
+    let (a, b, c, (), ()) =
+        tokio::join!(listener_a, listener_b, listener_c, signal, account_worker);
     a?;
     b?;
     c?;

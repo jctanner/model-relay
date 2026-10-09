@@ -439,3 +439,54 @@ workspace HTML/JS after rebuilding and restarting the liveoauth proxy process;
 the new live inventory exposed both bootstrap identities with no secret fields,
 disconnect cleared the selector, and storage health reported zero errors or
 dropped records. The temporary test container and network were removed.
+
+## Managed upstream OAuth accounts, 2026-10-09
+
+Added the **Upstream accounts** admin view and authenticated private CRUD/login
+routes. Account metadata is persisted in SQLite; managed native credentials
+live in private files on the same `/data` volume. Host-mirror profiles retain
+host-owned refresh and are not writable through account management.
+
+`./scripts/test.sh` passed all 26 Rust tests, formatting, and Clippy. New tests
+cover provider/PKCE URL validation, listener/admin-key separation, per-account
+login and code-state isolation, duplicate login rejection, credential publication
+and restart persistence, cancellation/expiry and repeated concurrent cancellation,
+disconnect, deletion reference checks, concurrent project assignment/deletion,
+and serialized refresh-token rotation. Rejected refreshes preserve the existing
+store and report reauthentication. Existing host-mirror tests still pass.
+
+Both proxy images now install pinned Claude Code 2.1.293 with the curl installer.
+The development and source-baked runtime images built successfully with locked
+Rust dependencies. `./scripts/test-runtime.sh` passed native Claude inference and
+REST/telemetry acceptance without source mounts: 15 recorded requests, zero
+storage errors or dropped records.
+
+A disposable rootless Podman stack exercised the browser flow with a synthetic
+native helper/provider: account creation, browser-link/code submission, rename,
+explicit refresh, project assignment, reconnect cancellation, disconnect, and
+deletion. Project-scoped model discovery and Messages inference used the selected
+managed account and recorded `upstream_profile: ui-team` / `claude-oauth` in
+telemetry. Container restart preserved account metadata and credentials while
+clearing login state. Desktop (1440px) and mobile (390px) layouts, dialog clearing,
+and secret-free stdout were checked.
+
+The real pinned native helper was tested through the REST login API in both the
+development and baked runtime containers. It returned an allowlisted provider
+URL with S256 PKCE; cancellation reaped the process, cleared the URL, and left no
+connected credentials. The temporary account was deleted. Actual browser
+consent/code exchange and provider refresh require a human-authorized account;
+those completion/rotation paths were tested against the synthetic provider.
+
+The running `liveoauth` proxy was rebuilt/restarted in its existing container.
+Its existing host account remained ready with host-owned refresh, and both
+client containers remained running. Account management and the native login
+helper are enabled at `http://127.0.0.1:44443/admin/`. A consistent SQLite backup
+was saved before adding the account table. No real managed account was created
+or host credential modified by this validation.
+
+Artifacts are under ignored `.state/admin-ui-validation/`:
+`managed-tests.log`, `managed-image-build.log`, `managed-runtime-build.log`,
+`managed-runtime-checks.log`, `managed-routing.json`, `managed-native-login.json`,
+`managed-live-upgrade.log`, `managed-live-verification.json`, and
+`accounts-{desktop,mobile}.png`. Native-login evidence contains only validation
+booleans/version metadata, never the real authorization URL or state.

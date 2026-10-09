@@ -2,7 +2,7 @@
 
 const $ = id => document.getElementById(id);
 const API = '/api/private/v1';
-const state = { key: '', session: 0, view: 'telemetry', projects: [], profiles: [], tokens: [], telemetryKeys: [], requests: [], cursor: null, query: '', telemetryLoad: 0, tokenLoad: 0, scopeLoad: 0, editingProject: null, editingToken: null, tokenFormProject: '', secretID: '', confirmation: null, requestID: '', events: [], eventCursor: null };
+const state = { key: '', session: 0, view: 'telemetry', projects: [], profiles: [], accounts: [], loginAvailable: false, managementEnabled: false, editingAccount: null, login: null, loginTimer: null, tokens: [], telemetryKeys: [], requests: [], cursor: null, query: '', telemetryLoad: 0, tokenLoad: 0, scopeLoad: 0, editingProject: null, editingToken: null, tokenFormProject: '', secretID: '', confirmation: null, requestID: '', events: [], eventCursor: null };
 const number = value => Number(value || 0).toLocaleString();
 const time = value => value ? new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
 const text = (id, value) => { $(id).textContent = value; };
@@ -59,14 +59,15 @@ async function collection(path) {
 }
 
 function disconnect() {
+  clearLogin(true);
   state.key = ''; state.session++; state.telemetryLoad++; state.tokenLoad++; state.scopeLoad++;
-  state.projects = []; state.profiles = []; state.tokens = []; state.telemetryKeys = []; state.requests = []; state.events = [];
+  state.projects = []; state.profiles = []; state.accounts = []; state.editingAccount = null; state.tokens = []; state.telemetryKeys = []; state.requests = []; state.events = [];
   state.cursor = null; state.confirmation = null; state.editingProject = null; state.editingToken = null;
   state.query = '';
   state.requestID = ''; state.eventCursor = null; state.tokenFormProject = '';
   for (const dialog of document.querySelectorAll('dialog')) dialog.close();
-  for (const form of [$('project-form'), $('token-form')]) form.reset();
-  for (const id of ['request-rows', 'project-rows', 'token-rows', 'profile-cards', 'model-bars', 'request-health']) $(id).replaceChildren();
+  for (const form of [$('project-form'), $('token-form'), $('account-form')]) form.reset();
+  for (const id of ['request-rows', 'project-rows', 'token-rows', 'profile-cards', 'account-rows', 'model-bars', 'request-health']) $(id).replaceChildren();
   for (const id of ['request-detail', 'request-events', 'secret-details', 'secret-status']) text(id, '');
   $('issued-secret').value = ''; state.secretID = ''; $('admin-key').value = '';
   $('filters').reset();
@@ -139,23 +140,24 @@ function renderHealth(health) {
 }
 
 async function workspace() {
-  const [projects, profiles, health] = await Promise.all([collection('/projects'), api('/upstream-profiles'), api('/health')]);
-  state.projects = projects; state.profiles = profiles.items;
+  const [projects, profiles, health, accounts] = await Promise.all([collection('/projects'), api('/upstream-profiles'), api('/health'), api('/upstream-accounts')]);
+  state.projects = projects; state.profiles = profiles.items; state.accounts = accounts.items; state.loginAvailable = accounts.login_available; state.managementEnabled = accounts.management_enabled;
   const options = projects.map(project => ({ value: project.project_id, label: `${project.display_name}${project.enabled ? '' : ' · disabled'}` }));
   selectOptions('token-project', options);
   selectOptions('project-profile', state.profiles.map(profile => ({ value: profile.profile_id, label: `${profile.profile_id} · ${profile.auth_mode}` })));
   text('project-count', number(projects.length)); text('profile-count', `${number(state.profiles.length)} upstream profile${state.profiles.length === 1 ? '' : 's'}`);
-  renderHealth(health); renderProjects(); await refreshTelemetryScopes();
+  renderHealth(health); renderProjects(); renderAccounts(); await refreshTelemetryScopes();
 }
 
 function setView(view) {
   state.view = view; notice('');
-  for (const name of ['telemetry', 'projects', 'tokens']) $(`${name}-view`).hidden = name !== view;
+  for (const name of ['telemetry', 'projects', 'tokens', 'accounts']) $(`${name}-view`).hidden = name !== view;
   for (const nav of document.querySelectorAll('[data-view]')) {
     const active = nav.dataset.view === view; nav.classList.toggle('active', active);
     if (active) nav.setAttribute('aria-current', 'page'); else nav.removeAttribute('aria-current');
   }
   if (view === 'tokens') return loadTokens();
+  if (view === 'accounts') return workspace();
 }
 
 function stamp() { text('updated-at', `Updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`); }
@@ -249,6 +251,102 @@ function renderProjects() {
     $('project-rows').append(row);
   }
   $('profile-cards').replaceChildren(...state.profiles.map(profile => { const card = element('div', undefined, 'profile-card'); card.append(element('h3', profile.profile_id), element('p', `${profile.backend} · ${profile.auth_mode}${profile.synthetic ? ' · synthetic' : ''}`)); return card; }));
+}
+
+const accountPath = id => `/upstream-accounts/${encodeURIComponent(id)}`;
+
+function renderAccounts() {
+  $('add-account').disabled = !state.managementEnabled;
+  text('accounts-note', state.loginAvailable ? `${number(state.accounts.length)} accounts · Browser login ready` : 'Claude login helper unavailable');
+  $('account-rows').replaceChildren();
+  if (!state.accounts.length) emptyRow('account-rows', 6, 'Add an upstream account, then connect it using your browser.');
+  for (const account of state.accounts) {
+    const auth = account.upstream_auth || {}; const row = element('tr'); const actions = element('div', undefined, 'actions account-actions');
+    const assigned = state.projects.filter(project => project.upstream_profile === account.profile_id);
+    const active = account.login && ['starting', 'awaiting_code', 'exchanging'].includes(account.login.state);
+    if (account.managed) {
+      const connect = button(active ? 'Continue login' : auth.state === 'ready' ? 'Reconnect' : 'Connect', () => connectAccount(account));
+      connect.disabled = !state.loginAvailable; actions.append(connect, button('Rename', () => accountEditor(account)));
+      if (auth.state === 'ready') actions.append(button('Refresh access', async () => { await api(accountPath(account.account_id) + '/refresh', 'POST'); await workspace(); notice('Account access refreshed.'); }));
+      if (auth.expires_at || active) actions.append(button('Disconnect', () => confirmAction('Disconnect upstream account?', `Projects using ${account.account_id} will lose upstream access until you reconnect. Its credentials will be removed from the relay.`, 'Disconnect account', async () => { await api(accountPath(account.account_id) + '/disconnect', 'POST'); await workspace(); notice('Account disconnected.'); }), 'danger-text'));
+      const remove = button('Delete', () => confirmAction('Delete upstream account?', `Delete ${account.account_id} and its stored credentials? Reassign any projects first.`, 'Delete account', async () => { await api(accountPath(account.account_id), 'DELETE'); await workspace(); notice('Upstream account deleted.'); }), 'danger-text');
+      remove.disabled = assigned.length > 0; remove.title = assigned.length ? 'Reassign this account’s projects before deleting' : ''; actions.append(remove);
+    } else actions.append(element('span', 'Server configured', 'hint'));
+    const label = active ? 'Login in progress' : auth.state === 'ready' ? 'Connected' : 'Needs connection';
+    row.append(cell(lines(account.display_name, account.account_id)), cell(badge(account.managed ? 'Relay managed' : 'Server configured')), cell(lines('', auth.last_error ? 'Reconnect required or refresh unavailable' : ''), badge(label, active ? 'warn' : auth.state === 'ready' ? 'good' : 'warn')), cell(time(auth.expires_at)), cell(lines(number(assigned.length), assigned.map(project => project.project_id).join(', '))), cell(actions));
+    $('account-rows').append(row);
+  }
+}
+
+function accountEditor(account = null) {
+  state.editingAccount = account; $('account-form').reset(); text('account-form-error', '');
+  text('account-dialog-title', account ? 'Rename upstream account' : 'Add upstream account');
+  $('account-id').disabled = !!account; $('account-id').value = account?.account_id || ''; $('account-name').value = account?.display_name || '';
+  $('account-dialog').showModal();
+}
+
+async function saveAccount() {
+  const id = $('account-id').value.trim(); const display_name = $('account-name').value.trim();
+  await api(state.editingAccount ? accountPath(id) : '/upstream-accounts', state.editingAccount ? 'PUT' : 'POST', state.editingAccount ? { display_name } : { account_id: id, display_name });
+  const added = !state.editingAccount; $('account-dialog').close(); await workspace();
+  if (added && state.loginAvailable) await connectAccount(state.accounts.find(account => account.account_id === id));
+  else notice('Upstream account saved.');
+}
+
+function clearLogin(cancel = false) {
+  const login = state.login; state.login = null; clearTimeout(state.loginTimer); state.loginTimer = null;
+  $('login-code').value = ''; $('login-url').value = ''; $('open-login-url').removeAttribute('href'); $('login-instructions').hidden = true;
+  if (cancel && login?.path && !login.terminal && state.key) {
+    // Capture the current key before disconnect clears it. Never persist login material.
+    fetch(API + login.path, { method: 'DELETE', headers: { Authorization: `Bearer ${state.key}` }, credentials: 'omit', cache: 'no-store', keepalive: true }).catch(() => {});
+  }
+}
+
+async function connectAccount(account) {
+  clearLogin(true); const session = state.session;
+  text('login-title', `Connect ${account.display_name}`); text('login-state', 'Starting login…'); text('login-error', ''); text('close-login', 'Cancel login');
+  $('login-dialog').showModal();
+  // Track initialization too, so closing the dialog cancels a late POST response.
+  const pending = {}; state.login = pending;
+  try {
+    const active = account.login && ['starting', 'awaiting_code', 'exchanging'].includes(account.login.state);
+    const flow = active ? await api(accountPath(account.account_id) + `/login/${encodeURIComponent(account.login.flow_id)}`) : await api(accountPath(account.account_id) + '/login', 'POST');
+    const path = accountPath(account.account_id) + `/login/${encodeURIComponent(flow.flow_id)}`;
+    if (state.session !== session || state.login !== pending || !$('login-dialog').open) {
+      if (state.session === session && state.key) await api(path, 'DELETE');
+      return;
+    }
+    const login = { path, terminal: false }; state.login = login; showLogin(flow, login); pollLogin(login);
+  } catch (error) { if (state.session === session && $('login-dialog').open) text('login-error', error.message); }
+}
+
+function showLogin(flow, login) {
+  if (state.login !== login) return;
+  const terminal = !['starting', 'awaiting_code', 'exchanging'].includes(flow.state); login.terminal = terminal;
+  const messages = { starting: 'Preparing your browser login…', awaiting_code: 'Waiting for your browser authorization.', exchanging: 'Completing the connection…', connected: 'Account connected. Select this account in a project’s upstream profile.', cancelled: 'Login cancelled.', expired: 'Login expired. Close this dialog and connect again.', failed: 'Login failed. Close this dialog and connect again.' };
+  text('login-state', messages[flow.state] || flow.state); text('login-error', flow.error || '');
+  $('login-instructions').hidden = flow.state !== 'awaiting_code';
+  $('login-url').value = flow.authorization_url || '';
+  if (flow.authorization_url) $('open-login-url').href = flow.authorization_url; else $('open-login-url').removeAttribute('href');
+  if (terminal) { $('login-code').value = ''; text('close-login', 'Close'); }
+}
+
+async function pollLogin(login) {
+  if (state.login !== login || login.terminal) return;
+  try {
+    const flow = await api(login.path); if (state.login !== login) return;
+    showLogin(flow, login);
+    if (login.terminal) { await workspace(); return; }
+    state.loginTimer = setTimeout(() => pollLogin(login), 1000);
+  } catch (error) { if (state.login === login) { text('login-error', error.message); state.loginTimer = setTimeout(() => pollLogin(login), 3000); } }
+}
+
+async function submitLoginCode() {
+  const login = state.login; if (!login || login.terminal) throw new Error('Start a new login.');
+  const code = $('login-code').value.trim(); $('login-code').value = '';
+  await api(login.path + '/code', 'POST', { code });
+  if (state.login !== login) return;
+  $('login-instructions').hidden = true; $('login-url').value = ''; $('open-login-url').removeAttribute('href'); text('login-state', 'Completing the connection…');
 }
 
 function projectEditor(project = null) {
@@ -418,6 +516,14 @@ $('filters').addEventListener('submit', event => { event.preventDefault(); task(
 $('telemetry-scope').addEventListener('change', event => { event.currentTarget.title = event.currentTarget.selectedOptions[0]?.textContent || ''; });
 $('load-more').addEventListener('click', event => task(event.currentTarget, () => loadTelemetry(true)));
 $('export-telemetry').addEventListener('click', () => download(JSON.stringify({ filters: Object.fromEntries(new URLSearchParams(state.query)), items: state.requests, next_cursor: state.cursor }, null, 2), 'model-relay-telemetry.json', 'application/json'));
+$('add-account').addEventListener('click', () => accountEditor());
+$('account-form').addEventListener('submit', event => { event.preventDefault(); task(event.submitter, saveAccount, 'account-form-error'); });
+$('login-form').addEventListener('submit', event => { event.preventDefault(); task(event.submitter, submitLoginCode, 'login-error'); });
+$('copy-login-url').addEventListener('click', event => task(event.currentTarget, async () => {
+  if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText($('login-url').value); text('login-state', 'Link copied. Open it in your authenticated browser.'); }
+  else { $('login-url').focus(); $('login-url').select(); }
+}, 'login-error'));
+$('login-dialog').addEventListener('close', () => clearLogin(true));
 $('add-project').addEventListener('click', () => projectEditor());
 $('project-form').addEventListener('submit', event => { event.preventDefault(); task(event.submitter, saveProject, 'project-form-error'); });
 $('token-project').addEventListener('change', event => task(event.currentTarget, loadTokens));

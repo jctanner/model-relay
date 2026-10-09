@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod admin_ui;
 pub mod auth;
 pub mod backend;
@@ -70,6 +71,7 @@ pub struct Model {
 
 #[derive(Clone)]
 pub struct App {
+    pub accounts: Option<Arc<accounts::Manager>>,
     pub upstreams: Arc<BTreeMap<String, backend::Backend>>,
     pub backend: backend::Backend,
     pub store: Store,
@@ -133,6 +135,7 @@ pub fn admin(app: App) -> Router {
         .route("/api/private/v1/telemetry/summary", get(summary))
         .route("/api/private/v1/telemetry/export", get(export))
         .merge(projects::routes())
+        .merge(accounts::routes())
         .layer(DefaultBodyLimit::max(64 * 1024))
         .route_layer(middleware::from_fn_with_state(
             app.clone(),
@@ -666,6 +669,7 @@ mod tests {
         std::fs::write(&path,json!({"keys":[{"client_id":"c","key_id":"k","sha256":auth::fingerprint("local"),"models":["model"],"backends":["mock"]}]}).to_string()).unwrap();
         let store = Store::open(&dir.path().join("db.sqlite")).unwrap();
         let app = App {
+            accounts: None,
             upstreams: Arc::new(BTreeMap::new()),
             mock_adc: None,
             backend: backend::Backend::Mock,

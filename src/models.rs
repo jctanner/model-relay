@@ -318,6 +318,7 @@ mod tests {
     async fn vertex_catalog_permissions_aliases_and_context() {
         let dir = tempfile::tempdir().unwrap();
         let app = App {
+            accounts: None,
             upstreams: std::sync::Arc::new(std::collections::BTreeMap::new()),
             backend: Backend::Mock,
             store: crate::telemetry::Store::open(&dir.path().join("db.sqlite")).unwrap(),

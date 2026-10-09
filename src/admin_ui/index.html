@@ -33,6 +33,7 @@
         <button class="nav-item active" data-view="telemetry" type="button" aria-current="page"><span aria-hidden="true">▥</span> Telemetry</button>
         <button class="nav-item" data-view="projects" type="button"><span aria-hidden="true">▦</span> Projects <span id="project-count" class="nav-count">0</span></button>
         <button class="nav-item" data-view="tokens" type="button"><span aria-hidden="true">⚿</span> Tokens</button>
+        <button class="nav-item" data-view="accounts" type="button"><span aria-hidden="true">↗</span> Upstream accounts</button>
       </nav>
       <div class="sidebar-bottom">
         <div class="connection-status"><span id="health-dot" class="status-dot"></span><span id="health-text">Connected</span></div>
@@ -72,9 +73,9 @@
       </section>
 
       <section id="projects-view" class="view" hidden>
-        <div class="page-heading"><div><p class="eyebrow">CLIENT ISOLATION</p><h1>Projects</h1><p class="muted">Bind client credentials to a project and an installed upstream profile.</p></div><button id="add-project" class="primary" type="button">+ Add project</button></div>
+        <div class="page-heading"><div><p class="eyebrow">CLIENT ISOLATION</p><h1>Projects</h1><p class="muted">Bind client credentials to a project and an upstream account.</p></div><button id="add-project" class="primary" type="button">+ Add project</button></div>
         <article class="panel table-panel"><div class="panel-heading"><h2>Your projects</h2><span id="projects-note" class="hint"></span></div><div class="table-scroll"><table><thead><tr><th>Project</th><th>Upstream profile</th><th>Labels</th><th>Status</th><th>Actions</th></tr></thead><tbody id="project-rows"></tbody></table></div></article>
-        <article class="panel profiles-panel"><div class="panel-heading"><h2>Installed upstream profiles</h2><span class="hint">Provider credentials are configured on the server</span></div><div id="profile-cards" class="profile-cards"></div></article>
+        <article class="panel profiles-panel"><div class="panel-heading"><h2>Installed upstream profiles</h2><span class="hint">Manage OAuth connections in Upstream accounts</span></div><div id="profile-cards" class="profile-cards"></div></article>
       </section>
 
       <section id="tokens-view" class="view" hidden>
@@ -83,10 +84,37 @@
         <article class="panel table-panel"><div class="panel-heading"><h2>Managed credentials</h2><span id="tokens-note" class="hint"></span></div><div class="table-scroll"><table><thead><tr><th>Name / client</th><th>Type</th><th>Model access</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead><tbody id="token-rows"></tbody></table></div></article>
         <p class="hint">This view lists credentials issued through the admin API. Bootstrap keys in the file registry remain managed on the server.</p>
       </section>
+      <section id="accounts-view" class="view" hidden>
+        <div class="page-heading"><div><p class="eyebrow">PROVIDER ACCESS</p><h1>Upstream accounts</h1><p class="muted">Connect Anthropic OAuth accounts and choose which projects use them.</p></div><button id="add-account" class="primary" type="button">+ Add account</button></div>
+        <article class="panel table-panel"><div class="panel-heading"><h2>Anthropic OAuth</h2><span id="accounts-note" class="hint"></span></div><div class="table-scroll"><table><thead><tr><th>Account</th><th>Source</th><th>Status</th><th>Access expires</th><th>Projects</th><th>Actions</th></tr></thead><tbody id="account-rows"></tbody></table></div></article>
+        <p class="hint">Relay-managed accounts keep their credentials on the relay and refresh automatically. To route a project through an account, select its ID in the project’s upstream profile. Existing server-configured accounts keep their current credential owner.</p>
+      </section>
       <footer class="page-footer">model-relay<span>Private admin API · Same-origin console</span></footer>
     </main>
   </div>
 
+  <dialog id="account-dialog">
+    <form id="account-form">
+      <div class="dialog-heading"><div><p class="eyebrow">ANTHROPIC OAUTH</p><h2 id="account-dialog-title">Add upstream account</h2></div><button class="icon-button" type="button" data-close="account-dialog" aria-label="Close account editor">×</button></div>
+      <label>Account ID<input id="account-id" required maxlength="63" pattern="[a-z][a-z0-9\-]*[a-z0-9]|[a-z]" placeholder="team-alpha"></label>
+      <label>Display name<input id="account-name" required maxlength="200" placeholder="Alpha team subscription"></label>
+      <p class="hint">After saving, connect this account using your browser. Its ID becomes an upstream profile for projects.</p>
+      <p id="account-form-error" class="form-error" role="alert"></p>
+      <div class="dialog-footer"><button class="secondary" type="button" data-close="account-dialog">Cancel</button><button class="primary" type="submit">Save account</button></div>
+    </form>
+  </dialog>
+  <dialog id="login-dialog" class="wide-dialog">
+    <div class="dialog-heading"><div><p class="eyebrow">ANTHROPIC OAUTH</p><h2 id="login-title">Connect account</h2></div><button class="icon-button" type="button" data-close="login-dialog" aria-label="Close account login">×</button></div>
+    <p id="login-state" class="muted" role="status">Starting login…</p>
+    <div id="login-instructions" hidden>
+      <ol class="login-steps"><li>Open this link in a browser where you can sign in to the desired Anthropic account.</li><li>Authorize access, then copy the code shown by the provider and paste it below.</li></ol>
+      <label>Authorization link<textarea id="login-url" readonly rows="3" autocomplete="off" spellcheck="false"></textarea></label>
+      <div class="secret-actions"><button id="copy-login-url" class="secondary" type="button">Copy link</button><a id="open-login-url" class="button-link" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open in browser ↗</a></div>
+      <form id="login-form"><label>Authorization code<input id="login-code" type="password" required autocomplete="off" spellcheck="false" maxlength="4096" placeholder="Paste the code from the browser"></label><button id="submit-login-code" class="primary" type="submit">Complete connection</button></form>
+    </div>
+    <p id="login-error" class="form-error" role="alert"></p>
+    <div class="dialog-footer"><button id="close-login" class="secondary" type="button" data-close="login-dialog">Cancel login</button></div>
+  </dialog>
   <dialog id="project-dialog">
     <form id="project-form">
       <div class="dialog-heading"><div><p class="eyebrow">PROJECT</p><h2 id="project-dialog-title">Add project</h2></div><button class="icon-button" type="button" data-close="project-dialog" aria-label="Close project editor">×</button></div>

@@ -5,7 +5,9 @@ Claude Code is the first client. `Containerfile.claude` executes Anthropic's
 inside the build container with an exact version argument. It verifies the
 installed version and places the binary in `/usr/local/bin`, outside the
 persistent client home volume. Updates are disabled in the runtime image.
-The proxy image contains no Claude Code CLI.
+The proxy images also install the pinned CLI through the curl installer. It is
+used only for isolated upstream-account login subprocesses; inference routing
+remains in Rust.
 
 The optional single-client API-key/Vertex wrapper uses the documented
 [Vertex override](https://code.claude.com/docs/en/google-vertex-ai) and
@@ -85,7 +87,7 @@ provider fixture without rebuilding images.
 The selected OAuth profile uses `Procfile.oauth`: three runtime containers plus a
 host watcher. Only an access-token mirror is mounted in the proxy, read-only;
 the host credential directory and refresh token are never mounted in either
-container. Login/refresh stays with the host CLI. Atomic host credential changes
+container for this host-mirror profile. Its login/refresh stays with the host CLI. Atomic host credential changes
 are mirrored without rebuilding/recreating containers. Use
 `scripts/test-host-oauth.sh` for the isolated synthetic acceptance suite and see
 the root README for the validated `liveoauth` session commands.
@@ -134,3 +136,7 @@ project-bound tokens; Messages clients use the same project's opaque API key.
 read-only at `/upstreams`, only in the proxy. Project/grant CRUD persists in the
 telemetry volume and requires no container rebuild or restart. See
 [project administration and client launch instructions](../docs/projects.md).
+
+Relay-managed accounts instead keep credentials in `/data/oauth-accounts/` and
+use the web console for browser login. The proxy owns their refresh and mounts
+no host Claude home. See [managed upstream accounts](../docs/upstream-accounts.md).

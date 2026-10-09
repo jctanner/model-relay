@@ -204,10 +204,10 @@ case ${1:-help} in
                         *) echo "Unknown SHIM_UPSTREAM_AUTH" >&2; exit 2 ;;
                     esac
                     if [[ -n "${SHIM_UPSTREAM_WORKSPACE:-}" ]]; then upstream_args+=(--env "SHIM_UPSTREAM_WORKSPACE=$SHIM_UPSTREAM_WORKSPACE"); fi
-                    if [[ -n "${SHIM_UPSTREAM_EGRESS_NETWORK:-}" ]]; then
-                        podman network exists "$SHIM_UPSTREAM_EGRESS_NETWORK" || { echo "Create SHIM_UPSTREAM_EGRESS_NETWORK first." >&2; exit 2; }
-                        upstream_args+=(--network "$SHIM_UPSTREAM_EGRESS_NETWORK")
-                    fi
+                fi
+                if [[ -n "${SHIM_UPSTREAM_EGRESS_NETWORK:-}" ]]; then
+                    podman network exists "$SHIM_UPSTREAM_EGRESS_NETWORK" || { echo "Create SHIM_UPSTREAM_EGRESS_NETWORK first." >&2; exit 2; }
+                    upstream_args+=(--network "$SHIM_UPSTREAM_EGRESS_NETWORK")
                 fi
                 podman run --rm --pull never --http-proxy=false --cidfile "$cid_file" --name "$proxy" \
                     --label "io.vertex-shim.session=${session}" \

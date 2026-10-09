@@ -193,7 +193,12 @@ can acquire replacements with their workload keys.
 
 Every project defaults to the existing `default` upstream profile, including
 its read-only host OAuth mirror. Separate client identities and telemetry do
-not require separate provider accounts. To use another account, put a
+not require separate provider accounts. The web console can create independent
+relay-managed accounts; connect one under **Upstream accounts**, then select
+its account ID as the project's `upstream_profile`. See
+[managed account APIs](upstream-accounts.md).
+
+For externally managed profiles, put a
 `profiles.json` and its credentials in an owner-only server directory, then
 start the proxy with `SHIM_UPSTREAM_PROFILES_DIR=/absolute/host/path`. The launcher
 mounts that directory read-only at `/upstreams`, only in the proxy.
@@ -219,8 +224,8 @@ Example `profiles.json` (credential paths are container paths):
 
 `claude-oauth` expects the same access-only `.credentials.json` mirror schema
 and owner-only directory/file permissions as the existing profile. Its owner
-must maintain that mirror; the proxy never logs in, refreshes, or modifies the
-source credentials. The existing Honcho watcher continues to manage only its
+must maintain that mirror; this read-only profile never logs in, refreshes, or
+modifies the source credentials. The existing Honcho watcher continues to manage only its
 configured default host mirror. Other profile mirrors need their own producer.
 `bearer-file` reads its token file on each request. Directory mounts follow
 atomic replacements. Profiles never accept tokens, paths, or provider URLs
@@ -231,8 +236,8 @@ project. Each profile has its own HTTP client, credential source, and model
 catalog cache; model discovery and inference use that project's selected
 account. There is no fallback to another account if a profile or credential is
 unavailable. Uninstalled profile IDs are rejected on project create/update.
-Profiles themselves are server configuration, rather than secret-bearing REST
-resources. Adding/changing the mounted profile configuration requires a proxy
+These externally managed profiles are server configuration. Relay-managed
+accounts are separate REST resources whose secrets remain on the server. Adding/changing the mounted profile configuration requires a proxy
 process restart; adding the mount to an existing container requires stack
 recreation. Project/grant CRUD needs neither.
 

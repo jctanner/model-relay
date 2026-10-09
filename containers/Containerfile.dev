@@ -2,6 +2,16 @@ FROM docker.io/library/rust@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e
 RUN apt-get update && apt-get install -y --no-install-recommends tini curl \
     && rm -rf /var/lib/apt/lists/* \
     && rustup component add rustfmt clippy
+
+# Login helper lives outside account HOME directories; pin the verified native transport.
+ARG CLAUDE_CODE_VERSION=2.1.293
+RUN HOME=/opt/claude-install bash -o pipefail -c \
+      'curl -fsSL https://claude.ai/install.sh | bash -s -- "$1"' \
+      -- "${CLAUDE_CODE_VERSION}" \
+    && install -m 0755 /opt/claude-install/.local/bin/claude /usr/local/bin/claude \
+    && test "$(claude --version)" = "${CLAUDE_CODE_VERSION} (Claude Code)" \
+    && rm -rf /opt/claude-install
+
 WORKDIR /opt/source
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 # Fetch the dependency graph with a minimal target. Source edits do not change

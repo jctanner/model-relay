@@ -15,6 +15,8 @@ client-work/
 /upstreams/
 secrets/
 credentials/
+oauth-accounts/
+.credential-*
 .claude/
 .claude.json*
 .codex/

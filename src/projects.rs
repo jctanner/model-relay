@@ -95,6 +95,7 @@ pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS project_credentials (key_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, payload TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS credentials_project ON project_credentials(project_id);
         CREATE INDEX IF NOT EXISTS telemetry_project ON requests(json_extract(payload,'$.project_id'), sequence);
+        CREATE TABLE IF NOT EXISTS upstream_accounts (account_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS control_migrations (version INTEGER PRIMARY KEY);")?;
     let transaction = connection.unchecked_transaction()?;
     if !transaction.query_row(
@@ -290,8 +291,9 @@ async fn create(
     Json(project): Json<Project>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     project.validate()?;
-    validate_profile(&app, &project.upstream_profile)?;
+    let managed = validate_profile(&app, &project.upstream_profile)?;
     app.store.control(true,move |c| {
+        validate_managed_profile(c, &project.upstream_profile, managed)?;
         let exists: bool=sql(c.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE project_id=?1 AND deleted=0)",[&project.project_id],|r|r.get(0)))?;
         if exists { return Err(conflict()); }
         sql(c.execute("INSERT INTO projects(project_id,payload,epoch,deleted) VALUES (?1,?2,?3,0) ON CONFLICT(project_id) DO UPDATE SET payload=excluded.payload,epoch=excluded.epoch,deleted=0",params![project.project_id,encode(&project),uuid::Uuid::new_v4().to_string()]))?;
@@ -304,11 +306,12 @@ async fn update(
     Json(project): Json<Project>,
 ) -> Result<Json<Value>, ApiError> {
     project.validate()?;
-    validate_profile(&app, &project.upstream_profile)?;
+    let managed = validate_profile(&app, &project.upstream_profile)?;
     if project.project_id != id {
         return Err(ApiError::bad("Project ID is immutable"));
     }
     app.store.control(true,move |c| {
+        validate_managed_profile(c, &project.upstream_profile, managed)?;
         let (previous,_)=load(c,&id)?;
         // Disabling changes the incarnation so re-enabling cannot revive issued tokens.
         sql(c.execute("UPDATE projects SET payload=?2,epoch=CASE WHEN ?3 THEN ?4 ELSE epoch END WHERE project_id=?1",params![id,encode(&project),(previous.enabled && !project.enabled) || previous.upstream_profile != project.upstream_profile,uuid::Uuid::new_v4().to_string()]))?;
@@ -759,9 +762,24 @@ async fn summary(
     telemetry(app, project, filter, true).await
 }
 
-fn validate_profile(app: &App, id: &str) -> Result<(), ApiError> {
+fn validate_managed_profile(c: &Connection, id: &str, managed: bool) -> Result<(), ApiError> {
+    if managed
+        && !sql(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM upstream_accounts WHERE account_id=?1)",
+            [id],
+            |r| r.get::<_, bool>(0),
+        ))?
+    {
+        return Err(ApiError::bad("Unknown upstream profile"));
+    }
+    Ok(())
+}
+fn validate_profile(app: &App, id: &str) -> Result<bool, ApiError> {
     if id == "default" || app.upstreams.contains_key(id) {
-        Ok(())
+        Ok(false)
+    } else if app.accounts.as_ref().is_some_and(|m| m.contains(id)) {
+        // Preserve this classification if the account is removed before the write.
+        Ok(true)
     } else {
         Err(ApiError::bad("Unknown upstream profile"))
     }
@@ -792,6 +810,11 @@ pub(crate) async fn backend_for_key(app: &App, key: &auth::Key) -> Result<Select
         app.upstreams
             .get(&project.upstream_profile)
             .cloned()
+            .or_else(|| {
+                app.accounts
+                    .as_ref()
+                    .and_then(|m| m.backend(&project.upstream_profile))
+            })
             .ok_or(ApiError(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "upstream_profile_unavailable",
@@ -920,6 +943,11 @@ async fn auth_status(
         app.upstreams
             .get(&p.upstream_profile)
             .cloned()
+            .or_else(|| {
+                app.accounts
+                    .as_ref()
+                    .and_then(|m| m.backend(&p.upstream_profile))
+            })
             .ok_or(ApiError(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "upstream_profile_unavailable",
@@ -938,6 +966,9 @@ async fn profiles(State(app): State<App>) -> Json<Value> {
     let info = |id: &str, b: &crate::backend::Backend| json!({"profile_id":id,"backend":b.name(),"synthetic":b.synthetic(),"auth_mode":match b {crate::backend::Backend::Mock=>"none",crate::backend::Backend::Anthropic(u)=>u.credentials.kind()}});
     let mut items = vec![info("default", &app.backend)];
     items.extend(app.upstreams.iter().map(|(id, b)| info(id, b)));
+    if let Some(manager) = &app.accounts {
+        items.extend(manager.profiles());
+    }
     Json(json!({"items":items}))
 }
 
@@ -953,6 +984,7 @@ mod tests {
         let registry = dir.join("keys.json");
         std::fs::write(&registry,json!({"keys":[{"client_id":"legacy","key_id":"legacy-key","sha256":auth::fingerprint("legacy-secret"),"models":["claude-fixture"],"backends":["mock"],"mock_adc":true}]}).to_string()).unwrap();
         App {
+            accounts: None,
             backend: Backend::Mock,
             upstreams: Arc::new(BTreeMap::from([("second-account".into(), Backend::Mock)])),
             store: Store::open(&dir.join("db.sqlite")).unwrap(),

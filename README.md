@@ -4,8 +4,10 @@ A Rust gateway with Vertex and Anthropic Messages interfaces for Claude Code, wi
 telemetry and a separate private REST listener. It includes a mock backend and an
 Anthropic Messages adapter with server-owned bearer credentials. The adapter is
 validated against an isolated synthetic provider and a live Claude Code turn.
-The OAuth profile reuses the host login through an access-only, read-only mirror;
-refresh stays with the host CLI. It does not implement its own login flow.
+Upstream accounts can be connected through the web admin console using a
+browser authorization link and pasted code; the relay stores and refreshes
+those accounts independently. The existing host-login profile remains an
+access-only, read-only mirror with refresh owned by the host CLI.
 
 ```text
 host Honcho / Procfile.dev (Procfile.oauth adds a host credential watcher)
@@ -64,8 +66,8 @@ API never receives the client's synthetic Google token.
 
 ## Start
 
-Requires rootless Podman, Python 3.13/uv, and host Honcho. Install Claude Code only
-inside the client image through Anthropic's native curl installer. Version
+Requires rootless Podman, Python 3.13/uv, and host Honcho. Install Claude Code
+inside the client and proxy images through Anthropic's native curl installer. Version
 2.1.293 is pinned and verified; base images are digest-pinned. Debian package
 repositories and the remote installer itself are still mutable inputs.
 
@@ -181,6 +183,45 @@ For a clean source-baked build with tests and lint checks and no source mounts:
 podman build -f containers/Containerfile.runtime -t localhost/vertex-shim:0.1.0 .
 ./scripts/test-runtime.sh           # native client + REST tests on baked image
 ```
+
+## Connect upstream OAuth accounts
+
+Open the admin console, select **Upstream accounts**, and **Add account**.
+Save an account ID/name, open or copy the authorization link into your browser,
+authorize the desired Anthropic account, and paste the resulting code into the
+console. The relay runs the pinned `claude auth login --claudeai` command with
+an isolated home/config directory. The browser runs on your machine; the pod
+needs no browser or inbound OAuth callback port. Failed or cancelled reconnects
+preserve the previous credentials until you explicitly disconnect.
+
+After connecting, edit a project and select the account ID as its upstream
+profile. Client authentication remains Vertex workload exchange, Anthropic API
+key, or MaaS API key; all three use the project's selected upstream account.
+The account view offers status, reconnect, access refresh, rename, disconnect,
+and deletion. Reassign projects before deleting an account. Login attempts
+expire after ten minutes; at most four can run simultaneously.
+
+Account metadata is in SQLite. Managed access/refresh credentials live in
+owner-only directories under `/data/oauth-accounts/`, on the same persistent
+volume as SQLite. Existing host mirrors stay read-only. Refreshes are serialized
+per account and saved by atomic replacement. Codes, credentials, and raw login
+output are excluded from telemetry and stdout; the private login-status API
+returns the authorization URL only to an authenticated administrator.
+
+For Kubernetes, persist `/data`, supply the admin key as a Secret, expose only
+the admin listener to administrators, and allow proxy egress to Anthropic's
+login/token and inference services. Use one relay replica and a **Recreate**
+rollout with this SQLite/file-backed store: a volume ownership lock refuses a
+second credential owner. Run as UID 1000 with a writable volume and preserve
+mode 0700 account directories / 0600 credential files. An empty deployment can
+start with `SHIM_BACKEND=mock` and configure managed accounts through the UI;
+assign production projects to those accounts before issuing client tokens.
+The bootstrap `default` profile remains a development simulator in that mode.
+For a local stack, `SHIM_UPSTREAM_EGRESS_NETWORK` allows an explicitly supplied
+proxy egress network even when starting with the mock bootstrap backend.
+
+See [managed account APIs and settings](docs/upstream-accounts.md) for REST
+routes, credential ownership, and persistence details.
 
 ## Authentication and models
 
@@ -401,7 +442,7 @@ The watcher polls every 0.5 seconds and follows host atomic replacements. Missin
 malformed, insecure, or logged-out host credentials invalidate the mirror. The
 proxy checks expiry per request and rejects tokens within 60 seconds of expiration
 with HTTP 503 before inference. Use the host Claude CLI to refresh/log in; this
-project never invokes host login or refresh. Regular watcher shutdown removes the
+host-mirror profile never invokes host login or refresh. Regular watcher shutdown removes the
 mirror; losing the watcher makes Honcho stop all containers. Python watcher
 errors and private auth status never print credential values.
 
