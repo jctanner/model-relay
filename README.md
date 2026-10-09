@@ -26,6 +26,42 @@ host Honcho / Procfile.dev (Procfile.oauth adds a host credential watcher)
          upstream OAuth/bearer mounted only in proxy
 ```
 
+## Vertex authentication flow
+
+In `mock-federated` mode, Claude Code uses its native Google ADC support. The
+client key and synthetic Google token authenticate the client to Model Relay;
+the proxy separately uses its server-side Anthropic OAuth credential with the
+upstream provider. This sequence shows `liveoauth`'s default profile.
+
+```mermaid
+sequenceDiagram
+    participant C as Claude Code Vertex client
+    participant P as Model Relay proxy
+    participant O as Host OAuth mirror
+    participant A as Anthropic API
+
+    Note over C,P: Separate Podman containers on the private stack network
+    Note over C: Project workload key is mounted read-only
+    C->>P: POST /v1/token (external-account ADC exchange)
+    Note right of P: Validate workload key and project audience
+    P-->>C: Short-lived synthetic project-bound access token
+    C->>P: POST Vertex rawPredict (Bearer synthetic token)
+    Note right of P: Validate project, model grants, and token
+    P->>P: Map Vertex request to Anthropic Messages
+    P->>O: Read current access token from read-only mirror
+    Note over O: Host Claude CLI owns OAuth login and refresh
+    P->>A: POST /v1/messages (Bearer Anthropic OAuth token)
+    A-->>P: Message or stream with usage
+    P->>P: Store project-scoped usage telemetry
+    P-->>C: Forward response
+```
+
+The client token is synthetic and validated locally; Model Relay does not
+exchange it with Google. Other projects can select another proxy-side upstream
+profile. For the default profile, the host OAuth mirror contains only the
+upstream access token. Claude Code never receives that token, and the Anthropic
+API never receives the client's synthetic Google token.
+
 ## Start
 
 Requires rootless Podman, Python 3.13/uv, and host Honcho. Install Claude Code only
