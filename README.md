@@ -180,9 +180,46 @@ Vertex fixture with disposable client state and sanitized request-shape logs.
 For a clean source-baked build with tests and lint checks and no source mounts:
 
 ```bash
-podman build -f containers/Containerfile.runtime -t localhost/vertex-shim:0.1.0 .
+podman build -t localhost/vertex-shim:0.1.0 .
 ./scripts/test-runtime.sh           # native client + REST tests on baked image
 ```
+
+## Build the deployment image
+
+The root `Dockerfile` builds the production relay, including the web admin
+console and pinned Claude OAuth login helper. Build from this repository root:
+
+```bash
+docker build -t model-relay:local .
+# Or, with rootless Podman:
+podman build -t localhost/model-relay:local .
+```
+
+Tag/push that image to your cluster's registry, or load it into your local
+cluster using its image-loading command. The image runs as UID/GID 1000 and
+starts the compiled relay directly; it needs no source mounts or Cargo at runtime.
+The build runs formatting, tests, and Clippy before producing the release binary.
+`.dockerignore` limits the build context to source and build inputs;
+`.containerignore` points to the same rules for Podman. The previous
+`containers/Containerfile.runtime` path is a compatibility link to `Dockerfile`.
+
+Provide the following at deployment time:
+
+| Setting or mount | Purpose |
+| --- | --- |
+| `/config/keys.json` | Client key registry; `{ "keys": [] }` starts with no bootstrap keys |
+| `/config/models.json` | Model aliases; `{}` allows managed projects to use upstream catalog grants |
+| `/run/secrets/admin-api-key` | Admin key mounted from a Kubernetes Secret |
+| Writable persistent `/data` | SQLite state and managed OAuth credentials, owned by runtime UID 1000 |
+| Writable `/tmp` | Temporary files when the container root filesystem is read-only |
+| `SHIM_ADMIN_LISTEN=0.0.0.0:8081` | Allow the private admin listener to be reached through a pod Service |
+
+Inference listens on port 8080. Keep admin port 8081 scoped to administrators.
+Use a single replica and `Recreate` rollout with the persistent SQLite/credential
+volume. A fresh deployment defaults to the mock backend; connect an upstream
+account in the admin console and assign production projects to its profile.
+See [managed upstream accounts](docs/upstream-accounts.md) for the OAuth setup
+and [project administration](docs/projects.md) for client credentials.
 
 ## Connect upstream OAuth accounts
 

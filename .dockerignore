@@ -1,0 +1,19 @@
+# Allow only build inputs. Exclude runtime state, credentials, work directories,
+# and reference checkouts from both Docker and Podman build contexts.
+**
+!Dockerfile
+!.dockerignore
+!.containerignore
+!containers/
+!containers/Containerfile.claude
+!containers/Containerfile.dev
+!containers/Containerfile.runtime
+!scripts/
+!scripts/container/
+!scripts/container/claude-proxy.sh
+!scripts/container/proxy-service.sh
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!src/
+!src/**

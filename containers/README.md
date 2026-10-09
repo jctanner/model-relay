@@ -1,4 +1,16 @@
-# Claude Code MVP client bootstrap
+# Container builds
+
+Build the production relay from the root `Dockerfile` with
+`podman build -t localhost/model-relay:local .` or
+`docker build -t model-relay:local .`. It includes the release Rust binary,
+embedded admin UI, and native OAuth login helper. The legacy
+`containers/Containerfile.runtime` is a compatibility link to the same file.
+
+`Containerfile.dev` provides the source-mounted development toolchain;
+`Containerfile.claude` builds the separate client image. Docker and Podman share
+the build-input allowlist in the root `.dockerignore`.
+
+## Claude Code MVP client bootstrap
 
 Claude Code is the first client. `Containerfile.claude` executes Anthropic's
 [native curl installer](https://code.claude.com/docs/en/setup#install-a-specific-version)

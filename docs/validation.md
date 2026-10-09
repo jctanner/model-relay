@@ -490,3 +490,18 @@ Artifacts are under ignored `.state/admin-ui-validation/`:
 `managed-live-upgrade.log`, `managed-live-verification.json`, and
 `accounts-{desktop,mobile}.png`. Native-login evidence contains only validation
 booleans/version metadata, never the real authorization URL or state.
+
+## Root deployment Dockerfile, 2026-10-09
+
+Added a regular root `Dockerfile` as the canonical production recipe, with the
+legacy `containers/Containerfile.runtime` path retained as a compatibility
+symlink. A regular `.dockerignore` contains the build-input allowlist;
+`.containerignore` links to it so Docker and Podman share the same exclusions.
+The README documents root build commands and required Kubernetes mounts/listeners.
+
+Both the default rootless `podman build .` and the legacy explicit `-f` build
+succeeded. They produced the exact previously validated production image,
+including UID/GID 1000, the compiled relay entrypoint, ports 8080/8081, and the
+pinned OAuth helper. No application source or runtime behavior changed.
+`git diff --check` passed. Build logs and image metadata checks are under ignored
+`.state/dockerfile-validation/`.
