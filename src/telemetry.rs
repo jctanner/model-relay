@@ -170,18 +170,107 @@ enum Write {
     Flush(oneshot::Sender<()>),
 }
 
+// Queued writes above which streamed usage events are dropped. Request records are kept up to
+// the hard limit, so a burst loses intermediate usage snapshots before it loses any request.
+const EVENT_QUEUE_LIMIT: u64 = 1024;
+const REQUEST_QUEUE_LIMIT: u64 = 65536;
+// Writes taken from the queue per transaction.
+const WRITE_BATCH: usize = 512;
+
 #[derive(Default)]
 struct Health {
     pending: AtomicU64,
-    dropped: AtomicU64,
+    dropped_requests: AtomicU64,
+    dropped_events: AtomicU64,
     errors: AtomicU64,
     persisted_at_ms: AtomicU64,
+    dropped_at_ms: AtomicU64,
+    error_at_ms: AtomicU64,
+}
+
+fn now_ms() -> u64 {
+    Utc::now().timestamp_millis() as u64
+}
+
+// Writes one batch in a single transaction. A request's record is rewritten at every usage
+// snapshot, so only its latest copy in the batch is written; events are keyed by
+// (request_id, sequence) and are coalesced the same way.
+fn write_batch(connection: &mut Connection, batch: Vec<Write>, health: &Health) {
+    let count = batch
+        .iter()
+        .filter(|w| !matches!(w, Write::Flush(_)))
+        .count() as u64;
+    let mut requests: Vec<(String, String)> = Vec::new();
+    let mut request_index = std::collections::HashMap::new();
+    let mut events: Vec<(String, u32, String)> = Vec::new();
+    let mut event_index = std::collections::HashMap::new();
+    let mut flushes = Vec::new();
+    for write in batch {
+        match write {
+            Write::Request(record) => {
+                let payload = serde_json::to_string(&record).expect("serializable record");
+                match request_index.get(&record.request_id) {
+                    Some(&i) => requests[i] = (record.request_id, payload),
+                    None => {
+                        request_index.insert(record.request_id.clone(), requests.len());
+                        requests.push((record.request_id, payload));
+                    }
+                }
+            }
+            Write::Event {
+                request_id,
+                sequence,
+                usage,
+                source,
+            } => {
+                let payload =
+                    json!({"sequence": sequence, "usage": usage, "source": source}).to_string();
+                let key = (request_id.clone(), sequence);
+                match event_index.get(&key) {
+                    Some(&i) => events[i] = (request_id, sequence, payload),
+                    None => {
+                        event_index.insert(key, events.len());
+                        events.push((request_id, sequence, payload));
+                    }
+                }
+            }
+            Write::Flush(reply) => flushes.push(reply),
+        }
+    }
+    let result = (|| -> rusqlite::Result<()> {
+        let transaction = connection.transaction()?;
+        {
+            let mut insert = transaction.prepare_cached("INSERT INTO requests(request_id,payload) VALUES (?1,?2) ON CONFLICT(request_id) DO UPDATE SET payload=excluded.payload")?;
+            for (id, payload) in &requests {
+                insert.execute(params![id, payload])?;
+            }
+            let mut event = transaction.prepare_cached(
+                "INSERT OR REPLACE INTO events(request_id,sequence,payload) VALUES (?1,?2,?3)",
+            )?;
+            for (id, sequence, payload) in &events {
+                event.execute(params![id, sequence, payload])?;
+            }
+        }
+        transaction.commit()
+    })();
+    if requests.len() + events.len() > 0 {
+        if result.is_err() {
+            health.errors.fetch_add(1, Ordering::Relaxed);
+            health.error_at_ms.store(now_ms(), Ordering::Relaxed);
+        } else {
+            health.persisted_at_ms.store(now_ms(), Ordering::Relaxed);
+        }
+    }
+    health.pending.fetch_sub(count, Ordering::Relaxed);
+    for reply in flushes {
+        let _ = reply.send(());
+    }
 }
 
 #[derive(Clone)]
 pub struct Store {
     path: Arc<PathBuf>,
-    sender: mpsc::Sender<Write>,
+    sender: mpsc::UnboundedSender<Write>,
     health: Arc<Health>,
     readers: Arc<Semaphore>,
     controls: Arc<Semaphore>,
@@ -192,26 +281,29 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let connection = Connection::open(path)?;
+        let mut connection = Connection::open(path)?;
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
             CREATE TABLE IF NOT EXISTS requests (sequence INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT UNIQUE NOT NULL, payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS events (request_id TEXT NOT NULL, sequence INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(request_id, sequence));")?;
         crate::projects::migrate(&connection)?;
-        let (sender, mut receiver) = mpsc::channel::<Write>(1024);
+        // Unbounded so that request records are never refused; enqueue() bounds it by count.
+        let (sender, mut receiver) = mpsc::unbounded_channel::<Write>();
         let health = Arc::new(Health::default());
         let worker_health = health.clone();
-        thread::Builder::new().name("telemetry-writer".into()).spawn(move || {
-            while let Some(write) = receiver.blocking_recv() {
-                let result = match write {
-                    Write::Request(record) => connection.execute("INSERT INTO requests(request_id,payload) VALUES (?1,?2) ON CONFLICT(request_id) DO UPDATE SET payload=excluded.payload", params![record.request_id, serde_json::to_string(&record).expect("serializable record")]),
-                    Write::Event { request_id, sequence, usage, source } => connection.execute("INSERT OR REPLACE INTO events(request_id,sequence,payload) VALUES (?1,?2,?3)", params![request_id, sequence, json!({"sequence": sequence, "usage": usage, "source": source}).to_string()]),
-                    Write::Flush(reply) => { let _ = reply.send(()); continue; },
-                };
-                if result.is_err() { worker_health.errors.fetch_add(1, Ordering::Relaxed); }
-                else { worker_health.persisted_at_ms.store(Utc::now().timestamp_millis() as u64, Ordering::Relaxed); }
-                worker_health.pending.fetch_sub(1, Ordering::Relaxed);
-            }
-        })?;
+        thread::Builder::new()
+            .name("telemetry-writer".into())
+            .spawn(move || {
+                while let Some(first) = receiver.blocking_recv() {
+                    let mut batch = vec![first];
+                    while batch.len() < WRITE_BATCH {
+                        match receiver.try_recv() {
+                            Ok(write) => batch.push(write),
+                            Err(_) => break,
+                        }
+                    }
+                    write_batch(&mut connection, batch, &worker_health);
+                }
+            })?;
         Ok(Self {
             path: Arc::new(path.into()),
             sender,
@@ -221,10 +313,16 @@ impl Store {
         })
     }
     fn enqueue(&self, write: Write) {
-        self.health.pending.fetch_add(1, Ordering::Relaxed);
-        if self.sender.try_send(write).is_err() {
+        let (limit, dropped) = match write {
+            Write::Event { .. } => (EVENT_QUEUE_LIMIT, &self.health.dropped_events),
+            _ => (REQUEST_QUEUE_LIMIT, &self.health.dropped_requests),
+        };
+        if self.health.pending.fetch_add(1, Ordering::Relaxed) >= limit
+            || self.sender.send(write).is_err()
+        {
             self.health.pending.fetch_sub(1, Ordering::Relaxed);
-            self.health.dropped.fetch_add(1, Ordering::Relaxed);
+            dropped.fetch_add(1, Ordering::Relaxed);
+            self.health.dropped_at_ms.store(now_ms(), Ordering::Relaxed);
         }
     }
     pub fn request(&self, record: &Record) {
@@ -239,11 +337,17 @@ impl Store {
         });
     }
     pub fn health(&self) -> Value {
-        json!({"pending_writes": self.health.pending.load(Ordering::Relaxed), "dropped_records": self.health.dropped.load(Ordering::Relaxed), "storage_errors": self.health.errors.load(Ordering::Relaxed), "last_persisted_at_unix_ms": self.health.persisted_at_ms.load(Ordering::Relaxed)})
+        let h = &self.health;
+        let (requests, events) = (
+            h.dropped_requests.load(Ordering::Relaxed),
+            h.dropped_events.load(Ordering::Relaxed),
+        );
+        let at = |v: &AtomicU64| Some(v.load(Ordering::Relaxed)).filter(|&ms| ms > 0);
+        json!({"pending_writes": h.pending.load(Ordering::Relaxed), "dropped_records": requests + events, "dropped_requests": requests, "dropped_events": events, "storage_errors": h.errors.load(Ordering::Relaxed), "last_persisted_at_unix_ms": h.persisted_at_ms.load(Ordering::Relaxed), "last_dropped_at_unix_ms": at(&h.dropped_at_ms), "last_storage_error_at_unix_ms": at(&h.error_at_ms)})
     }
     pub async fn flush(&self) {
         let (tx, rx) = oneshot::channel();
-        if self.sender.send(Write::Flush(tx)).await.is_ok() {
+        if self.sender.send(Write::Flush(tx)).is_ok() {
             let _ = rx.await;
         }
     }
@@ -341,6 +445,8 @@ pub struct Filter {
     pub from: Option<String>,
     pub to: Option<String>,
     pub format: Option<String>,
+    // "asc" (default): oldest first, the cursor moves forward. "desc": newest first.
+    pub order: Option<String>,
 }
 
 impl Filter {
@@ -383,9 +489,17 @@ impl Filter {
         {
             return Err(ApiError::bad("Invalid export format"));
         }
+        if self
+            .order
+            .as_ref()
+            .is_some_and(|s| s != "asc" && s != "desc")
+        {
+            return Err(ApiError::bad("Invalid order"));
+        }
         Ok(())
     }
     pub fn list(&self, connection: &Connection) -> rusqlite::Result<Value> {
+        let newest_first = self.order.as_deref() == Some("desc");
         let text = "SELECT sequence,payload FROM requests WHERE sequence > ?1
             AND (?2 IS NULL OR json_extract(payload,'$.run_id') = ?2)
             AND (?3 IS NULL OR json_extract(payload,'$.client_id') = ?3)
@@ -407,11 +521,19 @@ impl Filter {
         } else {
             text.into()
         };
+        let text = if newest_first {
+            text.replace("sequence > ?1", "sequence < ?1")
+                .replace("ORDER BY sequence", "ORDER BY sequence DESC")
+        } else {
+            text
+        };
         let mut query = connection.prepare(&text)?;
         let limit = self.limit.unwrap_or(100) as usize;
         let rows = query.query_map(
             params![
-                self.cursor.unwrap_or(0) as i64,
+                self.cursor
+                    .map(|c| c as i64)
+                    .unwrap_or(if newest_first { i64::MAX } else { 0 }),
                 self.run_id,
                 self.client_id,
                 self.key_id,
@@ -556,5 +678,92 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+    fn sample(id: &str) -> Record {
+        let mut record = Record::new(
+            "model",
+            "stream_generation",
+            Identity {
+                upstream_profile: "default".into(),
+                project_id: crate::projects::DEFAULT_PROJECT.into(),
+                client_id: "c".into(),
+                key_id: "k".into(),
+                scheme: "bearer",
+            },
+            &json!({"messages":[],"max_tokens":10}),
+            50,
+            None,
+            None,
+        );
+        record.request_id = id.into();
+        record
+    }
+    #[tokio::test]
+    async fn newest_first_pages_walk_backwards() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.sqlite")).unwrap();
+        for i in 0..5 {
+            store.request(&sample(&format!("r{i}")));
+        }
+        store.flush().await;
+        let ids = |page: &Value| -> Vec<String> {
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["request_id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let desc = |cursor| Filter {
+            order: Some("desc".into()),
+            limit: Some(2),
+            cursor,
+            ..Default::default()
+        };
+        let first = store.read(move |c| desc(None).list(c)).await.unwrap();
+        assert_eq!(ids(&first), ["r4", "r3"]);
+        let cursor = first["next_cursor"].as_u64();
+        let second = store.read(move |c| desc(cursor).list(c)).await.unwrap();
+        assert_eq!(ids(&second), ["r2", "r1"]);
+        let asc = store
+            .read(|c| {
+                Filter {
+                    limit: Some(2),
+                    ..Default::default()
+                }
+                .list(c)
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids(&asc), ["r0", "r1"]);
+        assert!(
+            Filter {
+                order: Some("newest".into()),
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn bursts_drop_events_before_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.sqlite")).unwrap();
+        let record = sample("burst");
+        // Far more writes than the event limit, enqueued faster than any writer drains them.
+        for i in 0..3000u32 {
+            store.event(&record, i, "SSE usage snapshot");
+            store.request(&record);
+        }
+        store.flush().await;
+        let health = store.health();
+        assert_eq!(health["dropped_requests"], 0);
+        assert_eq!(health["pending_writes"], 0);
+        assert_eq!(health["storage_errors"], 0);
+        let rows = store.read(|c| Filter::default().list(c)).await.unwrap();
+        assert_eq!(rows["items"].as_array().unwrap().len(), 1);
+        if health["dropped_events"] != 0 {
+            assert!(health["last_dropped_at_unix_ms"].as_u64().is_some());
+        }
     }
 }

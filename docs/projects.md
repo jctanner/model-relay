@@ -116,7 +116,8 @@ managed credentials or tokens.
 
 Global `/telemetry/requests`, `/telemetry/summary`, and `/telemetry/export` also
 accept `project_id`. Project telemetry accepts the existing time/model/client/
-key/run/operation/status filters and cursor pagination. Conflicting project
+key/run/operation/status filters, cursor pagination and `order=desc` for
+newest first. Conflicting project
 filters are rejected. Summaries cover one page (default 100, maximum 500);
 continue with `next_cursor` for larger histories. Counting requests are reported
 separately from generation totals. Requests record `project_id` and

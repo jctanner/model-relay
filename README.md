@@ -598,13 +598,21 @@ Telemetry totals cover the pages loaded in the console; use **Load more requests
 to include further pages. API-key token counts and model context occupancy are
 distinct from the upstream account's subscription quota, which is not collected.
 
+Telemetry is written off the request path by one writer thread, which commits
+whatever is queued in one transaction and keeps only the latest copy of each
+request record. When more than 1,024 writes are queued, streamed usage
+snapshots are dropped first; final request records are kept up to 65,536
+queued writes. `/health` counts both kinds of drop since start, and the
+console warns only about request drops or storage errors in the last 15
+minutes.
+
 Admin requests require the separate bearer key stored in `.state/dev/admin-api-key`.
 The private namespace is served only on the admin listener:
 
 | GET path under `/api/private/v1` | Result |
 | --- | --- |
 | `/auth/status` | Auth mode, host refresh ownership, readiness, and expiry; no tokens |
-| `/health` | Pending writes, storage errors, dropped records, persistence time |
+| `/health` | Pending writes, storage errors, dropped requests and usage events, persistence time, last drop and error times |
 | `/telemetry/requests` | Request summaries, cursor pagination |
 | `/telemetry/requests/{id}` | One request and its single attempt ID |
 | `/telemetry/requests/{id}/events` | Paginated numeric usage snapshots |
@@ -612,7 +620,8 @@ The private namespace is served only on the admin listener:
 | `/telemetry/export` | JSON page; `format=jsonl` returns NDJSON |
 
 List/summary/export support `project_id`, `run_id`, `client_id`, `key_id`, `backend`, `model`,
-`operation`, `usage_status`, `synthetic`, RFC3339 `from`/`to`, `cursor`, and `limit`.
+`operation`, `usage_status`, `synthetic`, RFC3339 `from`/`to`, `cursor`, `limit`, and
+`order` (`asc`, the default, oldest first; `desc`, newest first, which the console uses).
 Limits are 1–500 (default 100); each summary covers one page, and returns a cursor
 when another page exists. Summary `synthetic` is `null` for mixed pages, with
 separate synthetic/provider request counts. JSONL pagination uses `x-next-cursor`. Reads use four

@@ -132,11 +132,16 @@ async function refreshTelemetryScopes() {
   state.telemetryKeys = keys; renderTelemetryScopes();
 }
 
+// Drop and error counters are totals since the relay started, so only a recent one is a warning.
+const HEALTH_WINDOW_MS = 15 * 60 * 1000;
 function renderHealth(health) {
-  const warning = health.storage_errors > 0 || health.dropped_records > 0;
+  const recent = at => at !== null && at !== undefined && Date.now() - at < HEALTH_WINDOW_MS;
+  const errors = recent(health.last_storage_error_at_unix_ms);
+  const requestsLost = health.dropped_requests > 0 && recent(health.last_dropped_at_unix_ms);
+  const warning = errors || requestsLost;
   $('health-dot').classList.toggle('warn', warning);
-  text('health-text', warning ? 'Storage needs attention' : 'Relay connected');
-  $('health-text').title = `${number(health.pending_writes)} pending writes · ${number(health.dropped_records)} dropped records · ${number(health.storage_errors)} storage errors`;
+  text('health-text', errors ? 'Storage errors' : requestsLost ? 'Telemetry dropping requests' : 'Relay connected');
+  $('health-text').title = `${number(health.pending_writes)} pending writes · since start: ${number(health.dropped_requests ?? health.dropped_records)} dropped requests, ${number(health.dropped_events ?? 0)} dropped usage events, ${number(health.storage_errors)} storage errors`;
 }
 
 async function workspace() {
@@ -163,7 +168,7 @@ function setView(view) {
 function stamp() { text('updated-at', `Updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`); }
 
 function telemetryQuery() {
-  const query = new URLSearchParams({ limit: '100' });
+  const query = new URLSearchParams({ limit: '100', order: 'desc' });
   if ($('telemetry-scope').value) {
     const [project, key] = JSON.parse($('telemetry-scope').value);
     query.set('project_id', project);
@@ -220,7 +225,7 @@ function renderTelemetry() {
   $('request-health').replaceChildren(...health.map(([label, value]) => { const row = element('div'); row.append(element('dt', label), element('dd', typeof value === 'number' ? number(value) : value)); return row; }));
   $('request-rows').replaceChildren();
   if (!requests.length) emptyRow('request-rows', 8, 'No requests match these filters. Try a wider time range.');
-  for (const request of [...requests].reverse()) {
+  for (const request of requests) {
     const row = element('tr');
     const ratio = request.context?.input_utilization_ratio;
     const status = request.completion === 'complete' ? 'good' : request.completion === 'in_progress' ? 'warn' : 'bad';
@@ -236,7 +241,7 @@ function renderTelemetry() {
     ); $('request-rows').append(row);
   }
   text('request-scope', `${number(requests.length)} loaded · newest loaded first`);
-  text('pagination-note', state.cursor !== null ? 'More results available. Totals cover loaded pages; pages are fetched oldest first.' : 'All matching requests loaded. Counting requests are excluded from token totals.');
+  text('pagination-note', state.cursor !== null ? 'Older requests available. Totals cover the loaded requests, newest first.' : 'All matching requests loaded. Counting requests are excluded from token totals.');
   $('load-more').hidden = state.cursor === null; $('export-telemetry').disabled = !requests.length;
 }
 
