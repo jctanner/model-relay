@@ -33,9 +33,15 @@ use tokio::{
 
 pub const CLAUDE_VERSION: &str = "2.1.293";
 
+fn anthropic() -> String {
+    "anthropic".into()
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AccountInfo {
+    #[serde(default = "anthropic")]
+    provider: String,
     account_id: String,
     display_name: String,
 }
@@ -199,17 +205,32 @@ impl Manager {
         let directory = self.root.join(&info.account_id);
         private_directory(&directory)?;
         let oauth = OAuth::managed(directory.join("credentials"), self.refresh.clone())?;
-        let backend = Backend::Anthropic(
-            Upstream::new(
-                &self.base_url,
+        let backend = if info.provider == "enmaas" {
+            let mut upstream = Upstream::new(
+                "https://api.enmaas.devshift.net",
                 PathBuf::new(),
-                self.synthetic,
+                false,
                 None,
-                Duration::from_secs(120),
+                crate::backend::upstream_timeout().map_err(|_| ApiError::internal())?,
             )
             .map_err(|_| ApiError::internal())?
-            .with_oauth(oauth.clone()),
-        );
+            .with_enmaas();
+            upstream.credentials =
+                crate::credentials::Credentials::ManagedToken(directory.join("api-token.json"));
+            Backend::Anthropic(upstream)
+        } else {
+            Backend::Anthropic(
+                Upstream::new(
+                    &self.base_url,
+                    PathBuf::new(),
+                    self.synthetic,
+                    None,
+                    crate::backend::upstream_timeout().map_err(|_| ApiError::internal())?,
+                )
+                .map_err(|_| ApiError::internal())?
+                .with_oauth(oauth.clone()),
+            )
+        };
         Ok(Arc::new(Account {
             info: RwLock::new(info),
             directory,
@@ -239,7 +260,7 @@ impl Manager {
         self.account(id).ok().map(|account| account.backend.clone())
     }
     pub(crate) fn profiles(&self) -> Vec<Value> {
-        self.accounts.read().map(|accounts| accounts.iter().map(|(id, account)| json!({"profile_id":id,"backend":"anthropic","auth_mode":"claude-oauth","synthetic":account.backend.synthetic(),"managed":true})).collect()).unwrap_or_default()
+        self.accounts.read().map(|accounts| accounts.iter().map(|(id, account)| json!({"profile_id":id,"backend":"anthropic","provider":account.info.read().map(|i| i.provider.clone()).unwrap_or_default(),"auth_mode":match &account.backend { Backend::Anthropic(u) => u.credentials.kind(), Backend::Mock => "none" },"synthetic":account.backend.synthetic(),"managed":true})).collect()).unwrap_or_default()
     }
     fn snapshot(&self) -> Result<Vec<Arc<Account>>, ApiError> {
         Ok(self
@@ -256,7 +277,10 @@ impl Manager {
             .read()
             .map_err(|_| ApiError::internal())?
             .clone();
-        let auth = account.oauth.status().await;
+        let auth = match &account.backend {
+            Backend::Anthropic(u) => u.credentials.status().await,
+            Backend::Mock => Value::Null,
+        };
         let flow = account.flow.lock().await.clone();
         let login = match flow {
             Some(flow) => {
@@ -266,7 +290,7 @@ impl Manager {
             None => Value::Null,
         };
         Ok(
-            json!({"account_id":info.account_id,"profile_id":info.account_id,"display_name":info.display_name,"provider":"anthropic","managed":true,"upstream_auth":auth,"login":login}),
+            json!({"account_id":info.account_id,"profile_id":info.account_id,"display_name":info.display_name,"provider":info.provider,"managed":true,"upstream_auth":auth,"login":login}),
         )
     }
     async fn flow(&self, account: &str, id: &str) -> Result<Arc<Flow>, ApiError> {
@@ -278,6 +302,18 @@ impl Manager {
         Ok(flow)
     }
     async fn begin(self: &Arc<Self>, id: &str) -> Result<Value, ApiError> {
+        if self
+            .account(id)?
+            .info
+            .read()
+            .map_err(|_| ApiError::internal())?
+            .provider
+            != "anthropic"
+        {
+            return Err(ApiError::bad(
+                "This account uses an API token, not browser login",
+            ));
+        }
         if !self.helper_available {
             return Err(ApiError(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -368,6 +404,7 @@ impl Manager {
         if let Some(flow) = account.flow.lock().await.clone() {
             let _ = flow.control.try_send(Control::Cancel);
         }
+        remove_api_token(&account)?;
         account.oauth.disconnect().await
     }
     pub async fn background(self: Arc<Self>, mut stop: tokio::sync::watch::Receiver<bool>) {
@@ -381,7 +418,10 @@ impl Manager {
                     if *stop.borrow() {
                         break;
                     }
-                    let _ = account.oauth.renew(false).await;
+                    if matches!(&account.backend, Backend::Anthropic(u) if u.provider == "anthropic")
+                    {
+                        let _ = account.oauth.renew(false).await;
+                    }
                 }
             }
         }
@@ -504,6 +544,10 @@ async fn run_login(
 
 pub fn routes() -> Router<App> {
     Router::new()
+        .route(
+            "/api/private/v1/upstream-accounts/{account}/token",
+            axum::routing::put(set_token),
+        )
         .route("/api/private/v1/upstream-accounts", get(list).post(create))
         .route(
             "/api/private/v1/upstream-accounts/{account}",
@@ -559,7 +603,8 @@ async fn create(
     State(app): State<App>,
     Json(info): Json<AccountInfo>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    if !crate::projects::valid_id(&info.account_id)
+    if !["anthropic", "enmaas"].contains(&info.provider.as_str())
+        || !crate::projects::valid_id(&info.account_id)
         || info.account_id == "default"
         || info.display_name.is_empty()
         || info.display_name.len() > 200
@@ -579,6 +624,13 @@ async fn create(
     manager
         .store
         .control(true, move |c| {
+            if info.provider == "enmaas" {
+                crate::model_policy::save(
+                    c,
+                    &info.account_id,
+                    &crate::model_policy::Inventory::enmaas(),
+                )?;
+            }
             sql(c.execute(
                 "INSERT INTO upstream_accounts(account_id,payload) VALUES (?1,?2)",
                 rusqlite::params![info.account_id, json!(info).to_string()],
@@ -623,6 +675,12 @@ async fn update(
     let _guard = manager.operations.lock().await;
     let account = manager.account(&id)?;
     let info = AccountInfo {
+        provider: account
+            .info
+            .read()
+            .map_err(|_| ApiError::internal())?
+            .provider
+            .clone(),
         account_id: id.clone(),
         display_name: input.display_name,
     };
@@ -648,10 +706,12 @@ async fn remove(State(app): State<App>, Path(id): Path<String>) -> Result<Status
     let removed = account.clone();
     let account_id = id.clone();
     manager.store.control(true, move |c| {
-        let referenced: bool = sql(c.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE deleted=0 AND json_extract(payload,'$.upstream_profile')=?1)", [&account_id], |r|r.get(0)))?;
+        let referenced: bool = sql(c.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE deleted=0 AND ((json_type(payload,'$.routing') IS NULL OR json_type(payload,'$.routing')='null') AND json_extract(payload,'$.upstream_profile')=?1 OR json_extract(payload,'$.routing.default_upstream')=?1 OR EXISTS(SELECT 1 FROM json_each(payload,'$.routing.model_overrides') WHERE value=?1)))", [&account_id], |r|r.get(0)))?;
         if referenced { return Err(conflict("Reassign the account's projects before deleting it")); }
         removed.generation.fetch_add(1, Ordering::SeqCst);
         removed.oauth.disconnect_locked()?;
+        remove_api_token(&removed)?;
+        sql(c.execute("DELETE FROM model_inventories WHERE profile_id=?1", [&account_id]))?;
         sql(c.execute("DELETE FROM upstream_accounts WHERE account_id=?1", [&account_id]))?; Ok(())
     }).await?;
     if let Some(flow) = account.flow.lock().await.clone() {
@@ -747,7 +807,55 @@ async fn disconnect(
 }
 async fn refresh(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     let account = manager(&app)?.account(&id)?;
+    if matches!(&account.backend, Backend::Anthropic(u) if u.provider == "enmaas") {
+        return Err(ApiError::bad("Rotate API tokens using the token endpoint"));
+    }
     account.oauth.renew(true).await?;
+    Ok(Json(Manager::status(&account).await?))
+}
+
+fn remove_api_token(account: &Account) -> Result<(), ApiError> {
+    match std::fs::remove_file(account.directory.join("api-token.json")) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(ApiError::internal()),
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TokenInput {
+    token: String,
+}
+async fn set_token(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<TokenInput>,
+) -> Result<Json<Value>, ApiError> {
+    if input.token.is_empty()
+        || input.token.len() > 16 * 1024
+        || !input.token.bytes().all(|b| b.is_ascii_graphic())
+    {
+        return Err(ApiError::bad("Invalid API token"));
+    }
+    let manager = manager(&app)?;
+    let _guard = manager.operations.lock().await;
+    let account = manager.account(&id)?;
+    if account
+        .info
+        .read()
+        .map_err(|_| ApiError::internal())?
+        .provider
+        != "enmaas"
+    {
+        return Err(ApiError::bad("This account uses browser login"));
+    }
+    crate::credentials::atomic_json(
+        &account.directory.join("api-token.json"),
+        &json!({"token":input.token}),
+    )?;
+    if let Backend::Anthropic(u) = &account.backend {
+        u.clear_catalog().await;
+    }
     Ok(Json(Manager::status(&account).await?))
 }
 
@@ -758,6 +866,109 @@ mod tests {
     use http_body_util::BodyExt;
     use std::os::unix::fs::PermissionsExt;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn enmaas_tokens_are_private_rotatable_persistent_and_glm_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = setup(dir.path(), Duration::from_secs(10)).await;
+        let router = crate::admin(app.clone());
+        let path = "/api/private/v1/upstream-accounts/enmaas-test";
+        let created = call(
+            &router,
+            "POST",
+            "/api/private/v1/upstream-accounts",
+            "admin",
+            Some(json!({"account_id":"enmaas-test","display_name":"EnMaaS","provider":"enmaas"})),
+        )
+        .await;
+        assert_eq!(created.0, StatusCode::CREATED);
+        assert_eq!(created.1["provider"], "enmaas");
+        assert_eq!(
+            call(&router, "POST", &format!("{path}/login"), "admin", None)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        for secret in ["test-private-token-a", "test-private-token-b"] {
+            let result = call(
+                &router,
+                "PUT",
+                &format!("{path}/token"),
+                "admin",
+                Some(json!({"token":secret})),
+            )
+            .await;
+            assert_eq!(result.0, StatusCode::OK);
+            assert_eq!(result.1["upstream_auth"]["state"], "ready");
+            assert!(!result.1.to_string().contains(secret));
+            let Backend::Anthropic(upstream) = app
+                .accounts
+                .as_ref()
+                .unwrap()
+                .backend("enmaas-test")
+                .unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(upstream.credentials.token().await.unwrap(), secret);
+        }
+        let token_file = dir.path().join("accounts/enmaas-test/api-token.json");
+        assert_eq!(
+            std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let invpath = "/api/private/v1/upstream-profiles/enmaas-test/models";
+        let mut inventory = call(&router, "GET", invpath, "admin", None).await.1;
+        assert_eq!(inventory["models"][0]["id"], crate::model_policy::GLM);
+        assert_eq!(inventory["models"][0]["enabled"], true);
+        inventory["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"claude-opus-4-6","enabled":true,"manual":true}));
+        assert_eq!(
+            call(&router, "PUT", invpath, "admin", Some(inventory))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(
+                &router,
+                "PUT",
+                path,
+                "admin",
+                Some(json!({"display_name":"Renamed"}))
+            )
+            .await
+            .1["provider"],
+            "enmaas"
+        );
+        drop(router);
+        drop(app);
+        let reopened = setup(dir.path(), Duration::from_secs(10)).await;
+        let router = crate::admin(reopened.clone());
+        let detail = call(&router, "GET", path, "admin", None).await.1;
+        assert_eq!(detail["provider"], "enmaas");
+        assert_eq!(detail["upstream_auth"]["state"], "ready");
+        assert_eq!(
+            call(
+                &router,
+                "POST",
+                &format!("{path}/disconnect"),
+                "admin",
+                None
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        assert!(!token_file.exists());
+        assert_eq!(
+            call(&router, "DELETE", path, "admin", None).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert!(!reopened.accounts.as_ref().unwrap().contains("enmaas-test"));
+    }
 
     async fn setup(dir: &std::path::Path, lifetime: Duration) -> App {
         let binary = dir.join("claude");
@@ -778,6 +989,9 @@ mod tests {
         let registry = dir.join("keys.json");
         std::fs::write(&registry, "{\"keys\":[]}").unwrap();
         App {
+            routing: None,
+            inventory: None,
+            project_policy: Default::default(),
             accounts: Some(manager),
             backend: Backend::Mock,
             upstreams: Arc::new(BTreeMap::new()),
@@ -833,6 +1047,141 @@ mod tests {
         .unwrap()
     }
     const ROOT: &str = "/api/private/v1/upstream-accounts";
+    #[tokio::test]
+    async fn managed_account_streaming_uses_configured_timeout() {
+        // Isolate environment overrides from the parallel test suite, without
+        // mutating process-global environment variables in an async runtime.
+        let Ok(seconds) = std::env::var("SHIM_MANAGED_TIMEOUT_TEST") else {
+            for seconds in ["1", "3"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "accounts::tests::managed_account_streaming_uses_configured_timeout",
+                        "--nocapture",
+                    ])
+                    .env("SHIM_MANAGED_TIMEOUT_TEST", seconds)
+                    .env("SHIM_UPSTREAM_TIMEOUT_SECONDS", seconds)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "managed timeout {seconds}s failed: {} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+            return;
+        };
+        use futures_util::StreamExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let fixture = Router::new().route(
+            "/v1/messages",
+            post(|Json(body): Json<Value>| async move {
+                let start = futures_util::stream::once(async {
+                    Ok::<_, std::io::Error>(
+                        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_fixture\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                    )
+                });
+                let finish = futures_util::stream::once(async move {
+                    if body.pointer("/metadata/user_id").and_then(Value::as_str)
+                        == Some("broken")
+                    {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        Err(std::io::Error::other("synthetic broken stream"))
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                        Ok("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+                    }
+                });
+                (
+                    [("content-type", "text/event-stream")],
+                    Body::from_stream(start.chain(finish)),
+                )
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, fixture).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = setup(dir.path(), Duration::from_secs(600)).await;
+        let manager = Arc::get_mut(app.accounts.as_mut().unwrap()).unwrap();
+        manager.base_url = format!("http://{address}");
+        let account = manager
+            .build(AccountInfo {
+                provider: anthropic(),
+                account_id: "timeout-fixture".into(),
+                display_name: "Timeout fixture".into(),
+            })
+            .unwrap();
+        let Backend::Anthropic(mut upstream) = account.backend.clone() else {
+            panic!("managed account must use Anthropic backend");
+        };
+        // Only authentication is replaced; exercise the managed constructor's
+        // actual HTTP client and the production forwarding/telemetry path.
+        let token = dir.path().join("token");
+        std::fs::write(&token, "synthetic-fixture-token").unwrap();
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+        upstream.credentials = crate::credentials::Credentials::BearerFile(token);
+        for mode in ["slow", "broken"] {
+            let body = json!({"messages":[{"role":"user","content":"synthetic"}],
+                "max_tokens":10,"metadata":{"user_id":mode}});
+            let record = crate::telemetry::Record::new(
+                "fixture-model",
+                "stream_generation",
+                crate::auth::Identity {
+                    upstream_profile: "timeout-fixture".into(),
+                    project_id: "fixture".into(),
+                    client_id: "fixture".into(),
+                    key_id: "fixture".into(),
+                    scheme: "bearer",
+                },
+                &body,
+                0,
+                Some(mode.into()),
+                None,
+            );
+            let response = crate::backend::forward(
+                &upstream,
+                crate::Lifecycle::new(app.store.clone(), record),
+                body,
+                false,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let result =
+                tokio::time::timeout(Duration::from_secs(5), response.into_body().collect())
+                    .await
+                    .unwrap();
+            assert_eq!(result.is_ok(), mode == "slow" && seconds == "3");
+            app.store.flush().await;
+            let records = app
+                .store
+                .read(|conn| crate::telemetry::Filter::default().list(conn))
+                .await
+                .unwrap();
+            let row = records["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["run_id"] == mode)
+                .unwrap();
+            if mode == "broken" {
+                assert_eq!(row["error_type"], "upstream_stream_error");
+                assert_eq!(row["completion"], "failed");
+            } else if seconds == "1" {
+                assert_eq!(row["error_type"], "timeout_error");
+                assert_eq!(row["completion"], "failed");
+                assert_eq!(row["usage_status"], "partial");
+            } else {
+                assert_eq!(row["completion"], "complete");
+                assert_eq!(row["usage_status"], "complete");
+                assert_eq!(row["usage"]["output_tokens"], 2);
+            }
+        }
+        server.abort();
+    }
     #[tokio::test]
     async fn login_isolation_persistence_routing_and_disconnect() {
         let dir = tempfile::tempdir().unwrap();
@@ -1171,9 +1520,11 @@ mod tests {
                     "POST",
                     "/api/private/v1/projects",
                     "admin",
-                    Some(
+                    Some(if index % 2 == 0 {
                         json!({"project_id":id,"display_name":"Concurrent assignment","upstream_profile":id})
-                    )
+                    } else {
+                        json!({"project_id":id,"display_name":"Concurrent route","routing":{"default_upstream":"default","model_overrides":{"rits/zai-org/glm-5-3":id}}})
+                    })
                 ),
                 call(&router, "DELETE", &account_path, "admin", None)
             );

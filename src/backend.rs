@@ -185,8 +185,13 @@ pub(crate) async fn forward(
                             (stream, life, observer, sequence, false),
                         ))
                     }
-                    Some(Err(_)) => {
-                        life.fail(life.record.http_status, "upstream_stream_error");
+                    Some(Err(error)) => {
+                        let error_type = if error.is_timeout() {
+                            "timeout_error"
+                        } else {
+                            "upstream_stream_error"
+                        };
+                        life.fail(life.record.http_status, error_type);
                         Some((
                             Err(std::io::Error::other("Upstream stream failed")),
                             (stream, life, observer, sequence, true),
@@ -283,6 +288,7 @@ pub fn upstream_timeout() -> Result<Duration, std::num::ParseIntError> {
 
 #[derive(Clone)]
 pub struct Upstream {
+    pub provider: &'static str,
     pub client: Client,
     pub origin: Url,
     pub credentials: Credentials,
@@ -327,6 +333,7 @@ impl Upstream {
             .gzip(true)
             .build()?;
         Ok(Self {
+            provider: "anthropic",
             client,
             origin,
             credentials: Credentials::BearerFile(token_file),
@@ -338,6 +345,13 @@ impl Upstream {
     pub fn with_oauth(mut self, oauth: std::sync::Arc<OAuth>) -> Self {
         self.credentials = Credentials::ClaudeOAuth(oauth);
         self
+    }
+    pub fn with_enmaas(mut self) -> Self {
+        self.provider = "enmaas";
+        self
+    }
+    pub async fn clear_catalog(&self) {
+        *self.catalog_cache.lock().await = None;
     }
     pub async fn catalog(&self) -> Result<Vec<CatalogModel>, ApiError> {
         // Validate credentials on every read, including cached metadata. Rotation
@@ -383,11 +397,22 @@ impl Upstream {
                 bytes.extend_from_slice(&chunk);
             }
             let value: Value = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
-            if value.get("has_more").and_then(Value::as_bool) != Some(false) {
+            if value.get("has_more").and_then(Value::as_bool) != Some(false)
+                && !(self.provider == "enmaas" && value.get("has_more").is_none())
+            {
                 return Err(unavailable());
             }
+            let mut data = value["data"].clone();
+            if self.provider == "enmaas" {
+                for entry in data.as_array_mut().ok_or_else(unavailable)? {
+                    let id = entry["id"].as_str().ok_or_else(unavailable)?.to_owned();
+                    let fields = entry.as_object_mut().ok_or_else(unavailable)?;
+                    fields.entry("display_name").or_insert(json!(id));
+                    fields.entry("created_at").or_insert(json!(""));
+                }
+            }
             let mut models: Vec<CatalogModel> =
-                serde_json::from_value(value["data"].clone()).map_err(|_| unavailable())?;
+                serde_json::from_value(data).map_err(|_| unavailable())?;
             let mut ids = std::collections::BTreeSet::new();
             if models.len() > 1000
                 || models
@@ -420,13 +445,18 @@ impl Upstream {
         token: &str,
         beta: Option<&str>,
     ) -> reqwest::RequestBuilder {
-        let mut request = request
-            .bearer_auth(token)
-            .header("anthropic-version", "2023-06-01")
-            .header(
-                "user-agent",
-                concat!("vertex-shim/", env!("CARGO_PKG_VERSION")),
-            );
+        let request = if self.provider == "enmaas" {
+            request.header("x-api-key", token)
+        } else {
+            request.bearer_auth(token)
+        };
+        let mut request = request.header("anthropic-version", "2023-06-01").header(
+            "user-agent",
+            concat!("vertex-shim/", env!("CARGO_PKG_VERSION")),
+        );
+        if self.provider == "enmaas" {
+            return request;
+        }
         let oauth = matches!(self.credentials, Credentials::ClaudeOAuth(_));
         let beta = match (oauth, beta) {
             (true, Some(beta)) => Some(format!("oauth-2025-04-20,{beta}")),
@@ -455,6 +485,14 @@ impl Upstream {
             .ok_or_else(|| ApiError::bad("Expected object"))?;
         payload.remove("anthropic_version");
         payload.insert("model".into(), model.into());
+        if self.provider == "enmaas" && !counting {
+            // The live Messages endpoint accepts Claude's output_config contract.
+            let config = payload.entry("output_config").or_insert(json!({}));
+            config
+                .as_object_mut()
+                .ok_or_else(|| ApiError::bad("output_config must be an object"))?
+                .insert("effort".into(), json!("medium"));
+        }
         if counting {
             payload.remove("stream");
         } else {

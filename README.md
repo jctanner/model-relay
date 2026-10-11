@@ -387,7 +387,11 @@ Only the proxy mounts that file. HTTP origins require the explicit
 proxies are disabled. Set `SHIM_UPSTREAM_WORKSPACE` if your credential requires a
 workspace header; the client cannot override it. The total upstream timeout is
 `SHIM_UPSTREAM_TIMEOUT_SECONDS` (default 120, range 1–600). Managed upstream
-profiles use the same setting.
+profiles and UI-managed OAuth accounts use the same setting, including
+accounts restored after a restart. Timeouts during streaming are recorded as
+`timeout_error`, with partial usage and the original HTTP status (usually 200
+because response headers have already been sent). Other stream read failures
+remain `upstream_stream_error`.
 
 The model registry must supply `upstream_model` for each configured Vertex ID;
 the default maps `claude-sonnet-4-5@20250929` to `claude-sonnet-4-5-20250929`.
@@ -647,3 +651,7 @@ attempt per accepted request; it does not retry or fall back. Client retries
 arrive as separate requests.
 
 Recorded container verification is in [docs/validation.md](docs/validation.md).
+
+See [EnMaaS and model policy](docs/enmaas-and-model-policy.md) for managed API-token accounts, upstream inventories and project/token restrictions.
+
+See [project model routing](docs/project-model-routing.md) for default accounts, exact model overrides and explicit-only projects.

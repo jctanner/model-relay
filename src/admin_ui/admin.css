@@ -12,3 +12,14 @@ dialog{border:1px solid var(--border);border-radius:14px;padding:27px;width:480p
 .table-scroll{position:relative}
 
 .button-link{display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);border-radius:7px;padding:9px 15px;text-decoration:none;font-weight:600;color:var(--ink)}.button-link:hover{background:#edf1eb}.login-steps{padding-left:20px;color:var(--muted);font-size:13px}.login-steps li{margin-bottom:10px}#login-url{font-family:ui-monospace,SFMono-Regular,monospace;font-size:11px;overflow-wrap:anywhere}#login-form{margin-top:24px}.account-actions{flex-wrap:wrap;max-width:310px}@media(max-width:620px){.sidebar nav{flex-wrap:wrap}.nav-item{width:auto;flex:1 1 40%;font-size:12px}}
+
+#models-dialog input[type="number"] { width: 8rem; }
+#models-dialog input[type="text"], #models-dialog input:not([type]) { min-width: 12rem; }
+#token-model-effective { white-space: pre-wrap; max-height: 14rem; overflow: auto; }
+select[multiple] { min-height: 7rem; }
+
+.route-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; gap:12px; align-items:end; margin:12px 0; }
+.route-row label { min-width:0; }
+.route-row button { margin-bottom:2px; }
+.route-row input, .route-row select { width:100%; }
+@media (max-width:640px) { .route-row { grid-template-columns:1fr; } }

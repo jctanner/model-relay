@@ -5,8 +5,10 @@ pub mod backend;
 pub mod credentials;
 pub mod logging;
 pub mod mock_adc;
+pub mod model_policy;
 pub mod models;
 pub mod projects;
+pub mod routing;
 pub mod streaming;
 pub mod telemetry;
 
@@ -71,6 +73,9 @@ pub struct Model {
 
 #[derive(Clone)]
 pub struct App {
+    pub routing: Option<routing::Context>,
+    pub inventory: Option<model_policy::Inventory>,
+    pub project_policy: model_policy::ProjectPolicy,
     pub accounts: Option<Arc<accounts::Manager>>,
     pub upstreams: Arc<BTreeMap<String, backend::Backend>>,
     pub backend: backend::Backend,
@@ -90,13 +95,13 @@ pub fn inference(app: App) -> Router {
             }),
         )
         .route(
-            "/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{operation}",
+            "/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{*operation}",
             post(predict),
         )
         .route("/v1/messages", post(messages))
         .route("/v1/messages/count_tokens", post(count_messages))
         .route("/v1/models", get(models::list))
-        .route("/v1/models/{id}", get(models::detail))
+        .route("/v1/models/{*id}", get(models::detail))
         .route("/api/hello", axum::routing::head(|| async { StatusCode::NO_CONTENT }))
         .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
         .layer(middleware::from_fn(log_rejection))
@@ -136,6 +141,7 @@ pub fn admin(app: App) -> Router {
         .route("/api/private/v1/telemetry/export", get(export))
         .merge(projects::routes())
         .merge(accounts::routes())
+        .merge(model_policy::routes())
         .layer(DefaultBodyLimit::max(64 * 1024))
         .route_layer(middleware::from_fn_with_state(
             app.clone(),
@@ -176,7 +182,7 @@ async fn predict(
     };
     // Reload the verifier registry for every request, making rotation/revocation
     // effective without a container/image restart. Read off the async executor.
-    let (app, key, identity) = projects::authenticate(app, &headers).await?;
+    let (app, key, identity) = projects::authenticate_model(app, &headers, model).await?;
     projects::check_route(&app, &key, &project).await?;
     let (model_config, window_from_catalog) = models::resolve_vertex(&app, &key, model).await?;
     if !counting
@@ -256,7 +262,7 @@ async fn anthropic(
     {
         return Err(ApiError::bad("Invalid max_tokens"));
     }
-    let (app, key, identity) = projects::authenticate(app, &headers).await?;
+    let (app, key, identity) = projects::authenticate_model(app, &headers, model).await?;
     if !models::permitted(&app, &key, model) {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
@@ -267,7 +273,7 @@ async fn anthropic(
     let entry = models::catalog(&app)
         .await?
         .into_iter()
-        .find(|m| m.id == model)
+        .find(|m| m.id == models::canonical(&app, model))
         .ok_or_else(|| ApiError::bad("Unknown upstream model"))?;
     let spec = InferenceSpec {
         model: model.into(),
@@ -669,6 +675,9 @@ mod tests {
         std::fs::write(&path,json!({"keys":[{"client_id":"c","key_id":"k","sha256":auth::fingerprint("local"),"models":["model"],"backends":["mock"]}]}).to_string()).unwrap();
         let store = Store::open(&dir.path().join("db.sqlite")).unwrap();
         let app = App {
+            routing: None,
+            inventory: None,
+            project_policy: Default::default(),
             accounts: None,
             upstreams: Arc::new(BTreeMap::new()),
             mock_adc: None,

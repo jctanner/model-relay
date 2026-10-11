@@ -101,6 +101,7 @@ for mode in ('malformed', 'truncated', 'error', 'cancel', 'timeout'):
     assert rows[mode]['usage_status'] == 'partial', rows[mode]
 assert rows['truncated']['completion'] == 'failed'
 assert rows['error']['error_type'] == 'overloaded_error'
+assert rows['timeout']['error_type'] == 'timeout_error'
 assert rows['malformed']['observation_error'] == 'invalid_sse_json'
 assert rows['tool']['stop_reason'] == 'tool_use'
 assert all(r['synthetic'] and r['backend'] == 'anthropic' for r in rows.values())

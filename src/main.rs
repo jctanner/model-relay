@@ -59,13 +59,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?)?;
     if matches!(backend, Backend::Anthropic(_))
         && models.values().any(|model| {
-            model.upstream_model.as_ref().is_none_or(|name| {
-                name.is_empty()
-                    || name.len() > 200
-                    || !name
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-            })
+            model
+                .upstream_model
+                .as_ref()
+                .is_none_or(|name| !vertex_shim::model_policy::valid_id(name))
         })
     {
         return Err("Anthropic backend requires an explicit upstream_model for every model".into());
@@ -136,6 +133,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let app = App {
+        routing: None,
+        inventory: None,
+        project_policy: Default::default(),
         accounts: Some(accounts.clone()),
         upstreams: Arc::new(upstreams),
         mock_adc,

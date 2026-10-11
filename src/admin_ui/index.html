@@ -74,7 +74,7 @@
 
       <section id="projects-view" class="view" hidden>
         <div class="page-heading"><div><p class="eyebrow">CLIENT ISOLATION</p><h1>Projects</h1><p class="muted">Bind client credentials to a project and an upstream account.</p></div><button id="add-project" class="primary" type="button">+ Add project</button></div>
-        <article class="panel table-panel"><div class="panel-heading"><h2>Your projects</h2><span id="projects-note" class="hint"></span></div><div class="table-scroll"><table><thead><tr><th>Project</th><th>Upstream profile</th><th>Labels</th><th>Status</th><th>Actions</th></tr></thead><tbody id="project-rows"></tbody></table></div></article>
+        <article class="panel table-panel"><div class="panel-heading"><h2>Your projects</h2><span id="projects-note" class="hint"></span></div><div class="table-scroll"><table><thead><tr><th>Project</th><th>Routing</th><th>Labels</th><th>Status</th><th>Actions</th></tr></thead><tbody id="project-rows"></tbody></table></div></article>
         <article class="panel profiles-panel"><div class="panel-heading"><h2>Installed upstream profiles</h2><span class="hint">Manage OAuth connections in Upstream accounts</span></div><div id="profile-cards" class="profile-cards"></div></article>
       </section>
 
@@ -85,8 +85,8 @@
         <p class="hint">This view lists credentials issued through the admin API. Bootstrap keys in the file registry remain managed on the server.</p>
       </section>
       <section id="accounts-view" class="view" hidden>
-        <div class="page-heading"><div><p class="eyebrow">PROVIDER ACCESS</p><h1>Upstream accounts</h1><p class="muted">Connect Anthropic OAuth accounts and choose which projects use them.</p></div><button id="add-account" class="primary" type="button">+ Add account</button></div>
-        <article class="panel table-panel"><div class="panel-heading"><h2>Anthropic OAuth</h2><span id="accounts-note" class="hint"></span></div><div class="table-scroll"><table><thead><tr><th>Account</th><th>Source</th><th>Status</th><th>Access expires</th><th>Projects</th><th>Actions</th></tr></thead><tbody id="account-rows"></tbody></table></div></article>
+        <div class="page-heading"><div><p class="eyebrow">PROVIDER ACCESS</p><h1>Upstream accounts</h1><p class="muted">Connect provider accounts and choose their models and projects.</p></div><button id="add-account" class="primary" type="button">+ Add account</button></div>
+        <article class="panel table-panel"><div class="panel-heading"><h2>Provider accounts</h2><span id="accounts-note" class="hint"></span></div><div class="table-scroll"><table><thead><tr><th>Account</th><th>Source</th><th>Status</th><th>Access expires</th><th>Projects</th><th>Actions</th></tr></thead><tbody id="account-rows"></tbody></table></div></article>
         <p class="hint">Relay-managed accounts keep their credentials on the relay and refresh automatically. To route a project through an account, select its ID in the project’s upstream profile. Existing server-configured accounts keep their current credential owner.</p>
       </section>
       <footer class="page-footer">model-relay<span>Private admin API · Same-origin console</span></footer>
@@ -95,14 +95,31 @@
 
   <dialog id="account-dialog">
     <form id="account-form">
-      <div class="dialog-heading"><div><p class="eyebrow">ANTHROPIC OAUTH</p><h2 id="account-dialog-title">Add upstream account</h2></div><button class="icon-button" type="button" data-close="account-dialog" aria-label="Close account editor">×</button></div>
+      <div class="dialog-heading"><div><p class="eyebrow">UPSTREAM ACCOUNT</p><h2 id="account-dialog-title">Add upstream account</h2></div><button class="icon-button" type="button" data-close="account-dialog" aria-label="Close account editor">×</button></div>
       <label>Account ID<input id="account-id" required maxlength="63" pattern="[a-z][a-z0-9\-]*[a-z0-9]|[a-z]" placeholder="team-alpha"></label>
+      <label>Provider<select id="account-provider"><option value="anthropic">Anthropic OAuth</option><option value="enmaas">EnMaaS · personal API token</option></select></label>
       <label>Display name<input id="account-name" required maxlength="200" placeholder="Alpha team subscription"></label>
-      <p class="hint">After saving, connect this account using your browser. Its ID becomes an upstream profile for projects.</p>
+      <p class="hint">After saving, connect OAuth in your browser or enter an EnMaaS token. Its ID becomes an upstream profile for projects.</p>
       <p id="account-form-error" class="form-error" role="alert"></p>
       <div class="dialog-footer"><button class="secondary" type="button" data-close="account-dialog">Cancel</button><button class="primary" type="submit">Save account</button></div>
     </form>
   </dialog>
+
+  <dialog id="api-token-dialog">
+    <form id="api-token-form"><div class="dialog-heading"><h2>Set EnMaaS token</h2><button class="icon-button" type="button" data-close="api-token-dialog">×</button></div>
+    <p id="api-token-account" class="muted"></p><label>Personal API token<input id="api-token-value" type="password" required autocomplete="off" spellcheck="false" maxlength="16384"></label>
+    <p class="hint">Stored privately on the relay. Clients receive separate relay credentials.</p><p id="api-token-error" class="form-error"></p>
+    <div class="dialog-footer"><button class="primary" type="submit">Save token</button></div></form>
+  </dialog>
+  <dialog id="models-dialog" class="wide-dialog">
+    <div class="dialog-heading"><h2 id="models-title">Upstream models</h2><button class="icon-button" type="button" data-close="models-dialog">×</button></div>
+    <p id="models-status" class="hint"></p><div class="actions"><button id="models-refresh" type="button">Refresh discovery</button><button id="models-reload" type="button">Reload saved policy</button></div>
+    <div class="table-scroll"><table><thead><tr><th>Enabled</th><th>Exact ID / source</th><th>Display name override</th><th>Input limit override</th><th>Output limit override</th><th>Manual entry</th></tr></thead><tbody id="models-rows"></tbody></table></div>
+    <form id="manual-model-form"><label>Register exact model ID<input id="manual-model-id" maxlength="200" required></label><button type="submit">Add model</button></form>
+    <p class="hint">Saving enables explicit model policy. An empty enabled set denies all models. New discoveries stay disabled. GLM requests use medium effort. Unknown limits remain unset.</p>
+    <p id="models-error" class="form-error"></p><div class="dialog-footer"><button id="models-save" class="primary" type="button">Save policy</button></div>
+  </dialog>
+
   <dialog id="login-dialog" class="wide-dialog">
     <div class="dialog-heading"><div><p class="eyebrow">ANTHROPIC OAUTH</p><h2 id="login-title">Connect account</h2></div><button class="icon-button" type="button" data-close="login-dialog" aria-label="Close account login">×</button></div>
     <p id="login-state" class="muted" role="status">Starting login…</p>
@@ -115,12 +132,18 @@
     <p id="login-error" class="form-error" role="alert"></p>
     <div class="dialog-footer"><button id="close-login" class="secondary" type="button" data-close="login-dialog">Cancel login</button></div>
   </dialog>
-  <dialog id="project-dialog">
+  <dialog id="project-dialog" class="wide-dialog">
     <form id="project-form">
       <div class="dialog-heading"><div><p class="eyebrow">PROJECT</p><h2 id="project-dialog-title">Add project</h2></div><button class="icon-button" type="button" data-close="project-dialog" aria-label="Close project editor">×</button></div>
       <label>Project ID<input id="project-id" required maxlength="63" pattern="[a-z][a-z0-9\-]*[a-z0-9]|[a-z]" placeholder="agent-alpha"></label>
       <label>Display name<input id="project-name" required maxlength="200" placeholder="Alpha agent"></label>
-      <label>Upstream profile<select id="project-profile"></select></label>
+      <fieldset><legend>Model routing</legend>
+      <label>Default upstream account<select id="project-profile"></select></label>
+      <p class="hint">All models use the default account except the overrides below. Choose no default to allow only explicitly routed models. Routing does not grant model access.</p>
+      <div id="project-routes" class="route-rows"></div><datalist id="route-model-options"></datalist>
+      <button id="add-model-route" class="secondary" type="button">Add model route</button>
+      <p id="project-routing-note" class="hint"></p></fieldset>
+      <fieldset><legend>Model policy</legend><label>Access<select id="project-model-mode"><option value="inherit">Inherit enabled routed models</option><option value="allowlist">Only selected models</option></select></label><label>Allowed models<select id="project-model-allowed" multiple size="5"></select></label><label>Blocked models<select id="project-model-blocked" multiple size="5"></select></label><p id="project-model-note" class="hint"></p><pre id="project-model-effective" class="hint"></pre></fieldset>
       <label class="checkbox"><input id="project-enabled" type="checkbox" checked> Enabled</label>
       <label>Labels <span class="optional">optional JSON object</span><textarea id="project-labels" rows="3" spellcheck="false" placeholder='{"team":"platform"}'></textarea></label>
       <p id="project-form-error" class="form-error" role="alert"></p>
@@ -137,9 +160,9 @@
         <div id="maas-fields"><label>Name<input id="token-name" maxlength="200" placeholder="Nightly batch"></label><div class="form-grid"><label>Expires in<input id="token-expiry" placeholder="90d" maxlength="32"></label><label class="checkbox align-end"><input id="token-ephemeral" type="checkbox"> Ephemeral · max 1 hour</label></div></div>
       </div>
       <label>Client ID<input id="token-client" required maxlength="128" pattern="[A-Za-z0-9._\-]+" placeholder="alpha-agent"></label>
-      <label>Backend<input id="token-backend" readonly value="Anthropic OAuth"><span class="hint">Inherited from the project’s upstream profile. Provider credentials stay on the relay.</span></label>
+      <label>Backend<input id="token-backend" readonly value="Anthropic OAuth"><span class="hint">Inherited from the project’s model routes. Provider credentials stay on the relay.</span></label>
       <p id="token-auth-flow" class="hint"></p>
-      <fieldset><legend>Model access</legend><label>Explicit model IDs <span class="optional">one per line or comma separated</span><textarea id="token-models" rows="2" spellcheck="false" placeholder="claude-opus-4-6"></textarea></label><label class="checkbox"><input id="token-catalog" type="checkbox"> Allow all available models</label></fieldset>
+      <fieldset><legend>Model access</legend><label>Allowed models<select id="token-models" multiple size="5"></select></label><label class="checkbox"><input id="token-catalog" type="checkbox"> Allow all enabled models within project policy</label><label>Blocked models<select id="token-model-blocked" multiple size="5"></select></label><p id="token-model-note" class="hint"></p><pre id="token-model-effective" class="hint"></pre></fieldset>
       <p id="token-form-note" class="hint"></p><p id="token-form-error" class="form-error" role="alert"></p>
       <div class="dialog-footer"><button class="secondary" type="button" data-close="token-dialog">Cancel</button><button id="token-submit" class="primary" type="submit">Issue token</button></div>
     </form>

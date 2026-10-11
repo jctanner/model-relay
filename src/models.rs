@@ -24,16 +24,12 @@ pub struct CatalogModel {
 
 impl CatalogModel {
     pub fn validate(&self) -> bool {
-        !self.id.is_empty()
-            && self.id.len() <= 200
-            && self
-                .id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        crate::model_policy::valid_id(&self.id)
             && !self.display_name.is_empty()
             && self.display_name.len() <= 200
             && !self.display_name.chars().any(char::is_control)
-            && chrono::DateTime::parse_from_rfc3339(&self.created_at).is_ok()
+            && (self.created_at.is_empty()
+                || chrono::DateTime::parse_from_rfc3339(&self.created_at).is_ok())
             && self.line.as_deref().is_none_or(|s| {
                 !s.is_empty()
                     && s.len() <= 50
@@ -48,6 +44,9 @@ impl CatalogModel {
     pub fn json(&self) -> Value {
         let mut value = serde_json::to_value(self).expect("serializable model");
         value["type"] = json!("model");
+        if self.created_at.is_empty() {
+            value.as_object_mut().unwrap().remove("created_at");
+        }
         value
     }
 }
@@ -64,6 +63,38 @@ pub(crate) async fn registry(app: &App) -> Result<auth::Registry, ApiError> {
 }
 
 pub(crate) async fn catalog(app: &App) -> Result<Vec<CatalogModel>, ApiError> {
+    if let Some(context) = &app.routing {
+        let mut models = std::collections::BTreeMap::new();
+        for (profile, target) in &context.targets {
+            let Some(backend) = &target.backend else {
+                return Err(ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "upstream_profile_unavailable",
+                    "Model upstream profile is unavailable",
+                ));
+            };
+            if !context.backends.iter().any(|b| b == backend.name()) {
+                continue;
+            }
+            let mut selected = app.clone();
+            selected.routing = None;
+            selected.backend = backend.clone();
+            selected.inventory = Some(target.inventory.clone());
+            for model in Box::pin(catalog(&selected)).await? {
+                if context.config.destination(&model.id) == Some(profile.as_str())
+                    && context.denial(&model.id).is_none()
+                {
+                    models.insert(model.id.clone(), model);
+                }
+            }
+        }
+        return Ok(models.into_values().collect());
+    }
+    if let Some(inventory) = &app.inventory
+        && inventory.configured
+    {
+        return Ok(inventory.catalog());
+    }
     match &app.backend {
         Backend::Anthropic(upstream) => upstream.catalog().await,
         Backend::Mock => {
@@ -89,13 +120,36 @@ pub(crate) async fn catalog(app: &App) -> Result<Vec<CatalogModel>, ApiError> {
 }
 
 pub(crate) fn permitted(app: &App, key: &auth::Key, id: &str) -> bool {
-    key.catalog_models
-        || key.models.iter().any(|m| m == id)
-        || app.models.iter().any(|(alias, model)| {
-            model.upstream_model.as_deref() == Some(id) && key.models.contains(alias)
-        })
+    policy_permitted(app, key, id)
+        && (key.catalog_models
+            || key
+                .models
+                .iter()
+                .any(|grant| canonical(app, grant) == canonical(app, id)))
 }
 
+pub(crate) fn canonical(app: &App, id: &str) -> String {
+    app.models
+        .get(id)
+        .and_then(|m| m.upstream_model.clone())
+        .unwrap_or_else(|| upstream_id(id))
+}
+pub(crate) fn policy_permitted(app: &App, key: &auth::Key, id: &str) -> bool {
+    let id = canonical(app, id);
+    app.routing.as_ref().is_none_or(|r| r.denial(&id).is_none())
+        && app.inventory.as_ref().is_none_or(|i| i.permits(&id))
+        && app
+            .project_policy
+            .allowed
+            .as_ref()
+            .is_none_or(|ids| ids.iter().any(|s| canonical(app, s) == id))
+        && !app
+            .project_policy
+            .blocked
+            .iter()
+            .chain(key.blocked_models.iter())
+            .any(|s| canonical(app, s) == id)
+}
 fn vertex_id(id: &str) -> String {
     match id.rsplit_once('-') {
         Some((base, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => {
@@ -157,6 +211,15 @@ fn vertex_catalog(app: &App, key: &auth::Key, all: &[CatalogModel]) -> Vec<Catal
         }
         models.push(metadata);
     }
+    for model in all
+        .iter()
+        .filter(|m| key.models.iter().any(|grant| canonical(app, grant) == m.id))
+    {
+        if !models.iter().any(|m| canonical(app, &m.id) == model.id) {
+            models.push(model.clone());
+        }
+    }
+    models.retain(|m| policy_permitted(app, key, &m.id));
     models
 }
 
@@ -165,10 +228,36 @@ pub(crate) async fn resolve_vertex(
     key: &auth::Key,
     id: &str,
 ) -> Result<(crate::Model, bool), ApiError> {
+    if !policy_permitted(app, key, id) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            "Model access denied",
+        ));
+    }
     let explicit = app
         .models
         .get(id)
         .filter(|_| key.models.iter().any(|m| m == id));
+    if !key.vertex_catalog_models
+        && explicit.is_none()
+        && key
+            .models
+            .iter()
+            .any(|grant| canonical(app, grant) == canonical(app, id))
+        && let Some(entry) = catalog(app)
+            .await?
+            .into_iter()
+            .find(|m| m.id == canonical(app, id))
+    {
+        return Ok((
+            crate::Model {
+                window_tokens: entry.max_input_tokens,
+                upstream_model: Some(entry.id),
+            },
+            true,
+        ));
+    }
     if !key.vertex_catalog_models {
         return explicit
             .cloned()
@@ -289,8 +378,23 @@ pub async fn detail(
     State(app): State<App>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(page): Query<Page>,
 ) -> Result<Json<Value>, ApiError> {
     let (app, key, _) = crate::projects::authenticate(app, &headers).await?;
+    if let Some(api) = page.client_api.as_deref() {
+        if api != "vertex" {
+            return Err(ApiError::bad("Invalid client API"));
+        }
+        return vertex_catalog(&app, &key, &catalog(&app).await?)
+            .into_iter()
+            .find(|m| m.id == id || canonical(&app, &m.id) == canonical(&app, &id))
+            .map(|m| Json(m.json()))
+            .ok_or(ApiError(
+                StatusCode::FORBIDDEN,
+                "permission_error",
+                "Model access denied",
+            ));
+    }
     if !permitted(&app, &key, &id) {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
@@ -318,6 +422,9 @@ mod tests {
     async fn vertex_catalog_permissions_aliases_and_context() {
         let dir = tempfile::tempdir().unwrap();
         let app = App {
+            routing: None,
+            inventory: None,
+            project_policy: Default::default(),
             accounts: None,
             upstreams: std::sync::Arc::new(std::collections::BTreeMap::new()),
             backend: Backend::Mock,

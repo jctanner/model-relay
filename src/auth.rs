@@ -23,6 +23,8 @@ pub struct Key {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub models: Vec<String>,
+    #[serde(default)]
+    pub blocked_models: Vec<String>,
     pub backends: Vec<String>,
     /// Allows Messages models present in the upstream catalog, not arbitrary IDs.
     #[serde(default)]
@@ -251,6 +253,7 @@ mod tests {
     fn opaque_keys_conflicts_and_grants() {
         let registry = Registry {
             keys: vec![Key {
+                blocked_models: vec![],
                 project_id: None,
                 project_epoch: String::new(),
                 client_id: "client".into(),
@@ -307,6 +310,7 @@ mod tests {
     fn maas_keys_use_salted_verifiers_and_enforce_expiration() {
         let value = "sk-oai-abc123_secret456";
         let key = Key {
+            blocked_models: vec![],
             project_id: Some("agent".into()),
             project_epoch: String::new(),
             client_id: "client".into(),

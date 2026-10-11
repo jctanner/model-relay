@@ -259,8 +259,9 @@ async fn get_metadata(
                 {
                     return Err(ApiError::unauthorized());
                 }
-                let backend = crate::projects::backend_for_key(&app, key).await?;
-                return Ok(Json(adc.issue(&registry, backend.backend.name())?).into_response());
+                crate::projects::project_for_key(&app, key).await?;
+                let backend = key.backends.first().ok_or_else(ApiError::unauthorized)?;
+                return Ok(Json(adc.issue(&registry, backend)?).into_response());
             }
             _ => {
                 return Err(ApiError(
@@ -427,7 +428,10 @@ async fn exchange(
         ));
     }
     let adc = app.mock_adc.as_ref().ok_or_else(ApiError::unauthorized)?;
-    let mut token = adc.issue_key(&key, app.backend.name())?;
+    let mut token = adc.issue_key(
+        &key,
+        key.backends.first().ok_or_else(ApiError::unauthorized)?,
+    )?;
     token["issued_token_type"] = json!("urn:ietf:params:oauth:token-type:access_token");
     token["scope"] = json!(SCOPE);
     Ok(([("cache-control", "no-store")], Json(token)).into_response())

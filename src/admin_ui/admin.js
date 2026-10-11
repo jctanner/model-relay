@@ -60,6 +60,7 @@ async function collection(path) {
 
 function disconnect() {
   clearLogin(true);
+  previewGeneration++; projectPreviewGeneration++; routingInventories.clear(); modelEditor = null; accountTokenTarget = null;
   state.key = ''; state.session++; state.telemetryLoad++; state.tokenLoad++; state.scopeLoad++;
   state.projects = []; state.profiles = []; state.accounts = []; state.editingAccount = null; state.tokens = []; state.telemetryKeys = []; state.requests = []; state.events = [];
   state.cursor = null; state.confirmation = null; state.editingProject = null; state.editingToken = null;
@@ -252,10 +253,10 @@ function renderProjects() {
   for (const project of state.projects) {
     const row = element('tr'); const actions = element('div', undefined, 'actions');
     actions.append(button('Edit', () => projectEditor(project)), button('Tokens', () => { $('token-project').value = project.project_id; return setView('tokens'); }), button('Delete', () => confirmAction('Delete project?', `Delete ${project.project_id} and revoke all its managed credentials? Historical telemetry will be retained.`, 'Delete project', async () => { await api(`/projects/${encodeURIComponent(project.project_id)}`, 'DELETE'); await workspace(); notice('Project deleted. Historical telemetry is retained.'); }), 'danger-text'));
-    row.append(cell(lines(project.display_name, project.project_id)), cell(lines(project.upstream_profile || 'default', 'Server-owned provider credentials')), cell(Object.entries(project.labels || {}).map(([key, value]) => `${key}: ${value}`).join(' · ') || '—'), cell(badge(project.enabled ? 'Enabled' : 'Disabled', project.enabled ? 'good' : 'warn')), cell(actions));
+    row.append(cell(lines(project.display_name, project.project_id)), cell(lines(routingSummary(project), routingDetail(project))), cell(Object.entries(project.labels || {}).map(([key, value]) => `${key}: ${value}`).join(' · ') || '—'), cell(badge(project.enabled ? 'Enabled' : 'Disabled', project.enabled ? 'good' : 'warn')), cell(actions));
     $('project-rows').append(row);
   }
-  $('profile-cards').replaceChildren(...state.profiles.map(profile => { const card = element('div', undefined, 'profile-card'); card.append(element('h3', profile.profile_id), element('p', `${profile.backend} · ${profile.auth_mode}${profile.synthetic ? ' · synthetic' : ''}`)); return card; }));
+  $('profile-cards').replaceChildren(...state.profiles.map(profile => { const card = element('div', undefined, 'profile-card'); card.append(element('h3', profile.profile_id), element('p', `${profile.provider || profile.backend} · ${profile.auth_mode}${profile.synthetic ? ' · synthetic' : ''}`), button('Models', () => modelsEditor(profile.profile_id))); return card; }));
 }
 
 const accountPath = id => `/upstream-accounts/${encodeURIComponent(id)}`;
@@ -267,17 +268,20 @@ function renderAccounts() {
   if (!state.accounts.length) emptyRow('account-rows', 6, 'Add an upstream account, then connect it using your browser.');
   for (const account of state.accounts) {
     const auth = account.upstream_auth || {}; const row = element('tr'); const actions = element('div', undefined, 'actions account-actions');
-    const assigned = state.projects.filter(project => project.upstream_profile === account.profile_id);
+    const assigned = state.projects.filter(project => routingProfiles(projectRouting(project)).includes(account.profile_id));
     const active = account.login && ['starting', 'awaiting_code', 'exchanging'].includes(account.login.state);
     if (account.managed) {
+      if (account.provider === 'enmaas') { actions.append(button(auth.state === 'ready' ? 'Rotate token' : 'Set token', () => tokenAccountEditor(account)), button('Rename', () => accountEditor(account))); } else {
       const connect = button(active ? 'Continue login' : auth.state === 'ready' ? 'Reconnect' : 'Connect', () => connectAccount(account));
       connect.disabled = !state.loginAvailable; actions.append(connect, button('Rename', () => accountEditor(account)));
       if (auth.state === 'ready') actions.append(button('Refresh access', async () => { await api(accountPath(account.account_id) + '/refresh', 'POST'); await workspace(); notice('Account access refreshed.'); }));
-      if (auth.expires_at || active) actions.append(button('Disconnect', () => confirmAction('Disconnect upstream account?', `Projects using ${account.account_id} will lose upstream access until you reconnect. Its credentials will be removed from the relay.`, 'Disconnect account', async () => { await api(accountPath(account.account_id) + '/disconnect', 'POST'); await workspace(); notice('Account disconnected.'); }), 'danger-text'));
+      }
+      if (auth.state === 'ready' || auth.expires_at || active) actions.append(button('Disconnect', () => confirmAction('Disconnect upstream account?', `Projects using ${account.account_id} will lose upstream access until you reconnect. Its credentials will be removed from the relay.`, 'Disconnect account', async () => { await api(accountPath(account.account_id) + '/disconnect', 'POST'); await workspace(); notice('Account disconnected.'); }), 'danger-text'));
       const remove = button('Delete', () => confirmAction('Delete upstream account?', `Delete ${account.account_id} and its stored credentials? Reassign any projects first.`, 'Delete account', async () => { await api(accountPath(account.account_id), 'DELETE'); await workspace(); notice('Upstream account deleted.'); }), 'danger-text');
       remove.disabled = assigned.length > 0; remove.title = assigned.length ? 'Reassign this account’s projects before deleting' : ''; actions.append(remove);
     } else actions.append(element('span', 'Server configured', 'hint'));
     const label = active ? 'Login in progress' : auth.state === 'ready' ? 'Connected' : 'Needs connection';
+    actions.append(button('Models', () => modelsEditor(account.profile_id)));
     row.append(cell(lines(account.display_name, account.account_id)), cell(badge(account.managed ? 'Relay managed' : 'Server configured')), cell(lines('', auth.last_error ? 'Reconnect required or refresh unavailable' : ''), badge(label, active ? 'warn' : auth.state === 'ready' ? 'good' : 'warn')), cell(time(auth.expires_at)), cell(lines(number(assigned.length), assigned.map(project => project.project_id).join(', '))), cell(actions));
     $('account-rows').append(row);
   }
@@ -287,14 +291,16 @@ function accountEditor(account = null) {
   state.editingAccount = account; $('account-form').reset(); text('account-form-error', '');
   text('account-dialog-title', account ? 'Rename upstream account' : 'Add upstream account');
   $('account-id').disabled = !!account; $('account-id').value = account?.account_id || ''; $('account-name').value = account?.display_name || '';
+  $('account-provider').value = account?.provider || 'anthropic'; $('account-provider').disabled = !!account;
   $('account-dialog').showModal();
 }
 
 async function saveAccount() {
   const id = $('account-id').value.trim(); const display_name = $('account-name').value.trim();
-  await api(state.editingAccount ? accountPath(id) : '/upstream-accounts', state.editingAccount ? 'PUT' : 'POST', state.editingAccount ? { display_name } : { account_id: id, display_name });
+  await api(state.editingAccount ? accountPath(id) : '/upstream-accounts', state.editingAccount ? 'PUT' : 'POST', state.editingAccount ? { display_name } : { account_id: id, display_name, provider: $('account-provider').value });
   const added = !state.editingAccount; $('account-dialog').close(); await workspace();
-  if (added && state.loginAvailable) await connectAccount(state.accounts.find(account => account.account_id === id));
+  if (added && $('account-provider').value === 'enmaas') tokenAccountEditor(state.accounts.find(account => account.account_id === id));
+  else if (added && state.loginAvailable) await connectAccount(state.accounts.find(account => account.account_id === id));
   else notice('Upstream account saved.');
 }
 
@@ -354,20 +360,27 @@ async function submitLoginCode() {
   $('login-instructions').hidden = true; $('login-url').value = ''; $('open-login-url').removeAttribute('href'); text('login-state', 'Completing the connection…');
 }
 
-function projectEditor(project = null) {
+async function projectEditor(project = null) {
   state.editingProject = project; $('project-form').reset(); text('project-form-error', '');
   text('project-dialog-title', project ? 'Edit project' : 'Add project');
   $('project-id').value = project?.project_id || ''; $('project-id').disabled = !!project;
-  $('project-name').value = project?.display_name || ''; $('project-profile').value = project?.upstream_profile || 'default';
+  $('project-name').value = project?.display_name || '';
+  await loadRoutingInventories();
+  const routing = projectRouting(project); profileOptions($('project-profile'), routing.default_upstream, true);
+  $('project-routes').replaceChildren();
+  for (const [model, profile] of Object.entries(routing.model_overrides)) addRouteRow(model, profile);
   $('project-enabled').checked = project?.enabled ?? true;
   $('project-labels').value = project && Object.keys(project.labels || {}).length ? JSON.stringify(project.labels, null, 2) : '';
+  $('project-model-mode').value = project?.model_policy?.allowed == null ? 'inherit' : 'allowlist';
+  await projectModelOptions(project?.model_policy);
+  await projectModelPreview();
   $('project-dialog').showModal();
 }
 
 async function saveProject() {
   const labels = $('project-labels').value.trim() ? JSON.parse($('project-labels').value) : {};
   if (!labels || Array.isArray(labels) || typeof labels !== 'object' || Object.values(labels).some(value => typeof value !== 'string')) throw new Error('Labels must be a JSON object with string values.');
-  const project = { project_id: $('project-id').value.trim(), display_name: $('project-name').value.trim(), upstream_profile: $('project-profile').value, enabled: $('project-enabled').checked, labels };
+  const project = { project_id: $('project-id').value.trim(), display_name: $('project-name').value.trim(), upstream_profile: $('project-profile').value || 'default', routing: draftRouting(), enabled: $('project-enabled').checked, labels, model_policy: { allowed: $('project-model-mode').value === 'inherit' ? null : selectedModels('project-model-allowed'), blocked: selectedModels('project-model-blocked') } };
   await api(state.editingProject ? `/projects/${encodeURIComponent(project.project_id)}` : '/projects', state.editingProject ? 'PUT' : 'POST', project);
   $('project-dialog').close(); await workspace(); notice('Project saved.');
 }
@@ -376,7 +389,7 @@ async function loadTokens() {
   const projectID = $('token-project').value; const load = ++state.tokenLoad;
   const project = state.projects.find(project => project.project_id === projectID);
   $('issue-token').disabled = !project;
-  text('token-project-note', project ? `${project.project_id} · upstream: ${project.upstream_profile}${project.enabled ? '' : ' · project disabled'}` : 'Create a project to issue credentials.');
+  text('token-project-note', project ? `${project.project_id} · ${routingSummary(project)}${project.enabled ? '' : ' · project disabled'}` : 'Create a project to issue credentials.');
   emptyRow('token-rows', 6, project ? 'Loading credentials…' : 'No projects available.');
   if (!project) { state.tokens = []; text('tokens-note', 'No project selected'); return; }
   const tokens = await collection(`/projects/${encodeURIComponent(projectID)}/credentials`);
@@ -400,15 +413,11 @@ function renderTokens(project) {
 
 const tokenPath = (project, key) => `/projects/${encodeURIComponent(project)}/credentials/${encodeURIComponent(key)}`;
 
-function projectProfile(project) {
-  return state.profiles.find(item => item.profile_id === project?.upstream_profile);
+function projectProfiles(project) {
+  return routingProfiles(projectRouting(project)).map(id => state.profiles.find(p => p.profile_id === id)).filter(Boolean);
 }
-
 function providerName(project) {
-  const profile = projectProfile(project);
-  if (profile?.backend === 'mock') return 'Development simulator';
-  if (profile?.auth_mode === 'claude-oauth') return 'Anthropic OAuth';
-  return profile?.backend === 'anthropic' ? 'Anthropic · server credentials' : 'Unavailable';
+  return projectProfiles(project).map(profile => profile.provider === 'enmaas' ? 'EnMaaS' : profile.backend === 'mock' ? 'Development simulator' : 'Anthropic').filter((name, i, all) => all.indexOf(name) === i).join(' + ') || 'No available upstream';
 }
 
 function tokenAuthFlow(vertex) {
@@ -422,13 +431,13 @@ function tokenTypeChanged() {
   if (!state.editingToken) tokenAuthFlow(kind === 'vertex');
 }
 
-function tokenEditor(token = null) {
+async function tokenEditor(token = null) {
   state.editingToken = token; state.tokenFormProject = $('token-project').value;
   $('token-form').reset(); text('token-form-error', '');
   text('token-dialog-title', token ? 'Edit token grants' : 'Issue token');
   text('token-target', `Project: ${state.tokenFormProject}`); $('token-issue-fields').hidden = !!token;
   $('token-client').value = token?.client_id || '';
-  $('token-models').value = (token?.models || []).join('\n');
+
   const project = state.projects.find(item => item.project_id === state.tokenFormProject);
   $('token-backend').value = providerName(project);
   if (token) {
@@ -438,22 +447,23 @@ function tokenEditor(token = null) {
     else tokenAuthFlow(token.exchange_only);
   } else { $('token-catalog').checked = true; tokenTypeChanged(); }
   text('token-form-note', token ? 'Editing replaces grants. The token value, type, and expiration are preserved.' : 'Credentials are local to the relay. Upstream OAuth stays on the server.');
+  await tokenModelOptions(project, token);
   text('token-submit', token ? 'Save grants' : 'Issue token'); $('token-dialog').showModal();
 }
 
 async function saveToken() {
-  const models = [...new Set($('token-models').value.split(/[\s,]+/).filter(Boolean))];
+  const models = selectedModels('token-models');
   const project = state.projects.find(item => item.project_id === state.tokenFormProject);
-  const profile = projectProfile(project);
-  if (!profile) throw new Error('The project’s upstream profile is unavailable.');
+  const profiles = projectProfiles(project);
+  if (!profiles.length) throw new Error('The project’s upstream profile is unavailable.');
   const old = state.editingToken;
   const vertex = old ? !!old.exchange_only : $('token-type').value === 'vertex';
   const catalog = $('token-catalog').checked;
-  if (!models.length && !catalog) throw new Error('Grant at least one model or allow available models.');
+
   const hadCatalog = old && (old.catalog_models || old.vertex_catalog_models);
   const data = {
-    client_id: $('token-client').value.trim(), models,
-    backends: old ? old.backends : [profile.backend],
+    client_id: $('token-client').value.trim(), models, blocked_models: selectedModels('token-model-blocked'),
+    backends: old ? old.backends : [...new Set(profiles.map(p => p.backend))],
     catalog_models: catalog && (hadCatalog ? old.catalog_models : !vertex),
     vertex_catalog_models: catalog && (hadCatalog ? old.vertex_catalog_models : vertex),
     mock_adc: old ? old.mock_adc : vertex,
@@ -521,6 +531,178 @@ $('filters').addEventListener('submit', event => { event.preventDefault(); task(
 $('telemetry-scope').addEventListener('change', event => { event.currentTarget.title = event.currentTarget.selectedOptions[0]?.textContent || ''; });
 $('load-more').addEventListener('click', event => task(event.currentTarget, () => loadTelemetry(true)));
 $('export-telemetry').addEventListener('click', () => download(JSON.stringify({ filters: Object.fromEntries(new URLSearchParams(state.query)), items: state.requests, next_cursor: state.cursor }, null, 2), 'model-relay-telemetry.json', 'application/json'));
+
+let accountTokenTarget = null;
+function tokenAccountEditor(account) {
+  accountTokenTarget = account.account_id; $('api-token-value').value = ''; text('api-token-error', '');
+  text('api-token-account', account.display_name); $('api-token-dialog').showModal();
+}
+$('api-token-dialog').addEventListener('close', () => { $('api-token-value').value = ''; accountTokenTarget = null; });
+$('api-token-form').addEventListener('submit', event => { event.preventDefault(); task(event.submitter, async () => {
+  const token = $('api-token-value').value.trim(); $('api-token-value').value = '';
+  await api(accountPath(accountTokenTarget) + '/token', 'PUT', { token });
+  $('api-token-dialog').close(); await workspace(); notice('EnMaaS token saved.');
+}, 'api-token-error'); });
+const inventoryPath = profile => `/upstream-profiles/${encodeURIComponent(profile)}/models`;
+let modelEditor = null;
+function collectInventory() {
+  if (!modelEditor) return;
+  for (const row of $('models-rows').children) {
+    const entry = modelEditor.inventory.models.find(m => m.id === row.dataset.id);
+    const [enabled, name, input, output, manual] = row.querySelectorAll('input');
+    entry.enabled = enabled.checked; entry.display_name = name.value.trim() || null;
+    entry.max_input_tokens = input.value ? Number(input.value) : null;
+    entry.max_tokens = output.value ? Number(output.value) : null; entry.manual = manual.checked;
+  }
+}
+function renderInventory() {
+  const { profile, inventory } = modelEditor; text('models-title', `Models · ${profile}`);
+  text('models-status', `${inventory.configured ? 'Explicit policy' : 'Legacy inherited access'} · version ${inventory.version} · discovery ${inventory.refreshed_at ? time(inventory.refreshed_at) : 'not refreshed'}${inventory.refresh_error ? ' · ' + inventory.refresh_error : ''}`);
+  $('models-rows').replaceChildren();
+  for (const entry of inventory.models) {
+    const row = element('tr'); row.dataset.id = entry.id;
+    const enabled = element('input'); enabled.type = 'checkbox'; enabled.checked = entry.enabled;
+    const name = element('input'); name.value = entry.display_name || ''; name.placeholder = entry.discovered?.display_name || entry.id; name.maxLength = 200;
+    const limit = (override, discovered) => { const input = element('input'); input.type = 'number'; input.min = '1'; input.step = '1'; input.value = override ?? ''; input.placeholder = discovered == null ? 'Unknown' : String(discovered); return input; };
+    const manual = element('input'); manual.type = 'checkbox'; manual.checked = entry.manual;
+    row.append(cell(enabled), cell(lines(entry.id, entry.discovered ? 'Discovered' : entry.manual ? 'Manual' : 'Unavailable', true)), cell(name), cell(limit(entry.max_input_tokens, entry.discovered?.max_input_tokens)), cell(limit(entry.max_tokens, entry.discovered?.max_tokens)), cell(manual));
+    $('models-rows').append(row);
+  }
+}
+async function modelsEditor(profile) {
+  modelEditor = { profile, inventory: await api(inventoryPath(profile)) }; text('models-error', ''); renderInventory(); $('models-dialog').showModal();
+}
+$('models-dialog').addEventListener('close', () => { modelEditor = null; $('manual-model-id').value = ''; });
+$('models-reload').addEventListener('click', event => task(event.target, async () => { modelEditor.inventory = await api(inventoryPath(modelEditor.profile)); renderInventory(); }, 'models-error'));
+$('models-refresh').addEventListener('click', event => task(event.target, async () => {
+  collectInventory(); const draft = modelEditor.inventory;
+  const refreshed = await api(inventoryPath(modelEditor.profile) + '/refresh', 'POST');
+  if (refreshed.version !== draft.version + 1) throw new Error('Policy changed in another editor. Reload saved policy before continuing.');
+  // Keep unsaved editor overrides only when no concurrent edit intervened.
+  for (const entry of refreshed.models) { const old = draft.models.find(m => m.id === entry.id); if (old) Object.assign(entry, { enabled: old.enabled, manual: old.manual, display_name: old.display_name, max_input_tokens: old.max_input_tokens, max_tokens: old.max_tokens }); }
+  for (const old of draft.models) if (!refreshed.models.some(m => m.id === old.id)) refreshed.models.push(old);
+  modelEditor.inventory = refreshed; renderInventory();
+}, 'models-error'));
+$('models-save').addEventListener('click', event => task(event.target, async () => {
+  collectInventory(); modelEditor.inventory = await api(inventoryPath(modelEditor.profile), 'PUT', modelEditor.inventory); renderInventory(); notice('Model policy saved. Existing credentials follow it on their next request.');
+}, 'models-error'));
+$('manual-model-form').addEventListener('submit', event => { event.preventDefault(); collectInventory(); const id = $('manual-model-id').value.trim();
+  if (modelEditor.inventory.models.some(m => m.id === id)) { text('models-error', 'This model is already registered.'); return; }
+  modelEditor.inventory.models.push({ id, enabled: false, manual: true, discovered: null, display_name: null, max_input_tokens: null, max_tokens: null }); $('manual-model-id').value = ''; renderInventory();
+});
+const selectedModels = id => [...$(id).selectedOptions].map(o => o.value);
+function modelOptions(id, inventory, selected = []) {
+  const entries = new Map(inventory.models.map(m => [m.id, m])); for (const key of selected) if (!entries.has(key)) entries.set(key, { id: key });
+  $(id).replaceChildren();
+  for (const entry of entries.values()) { const option = element('option', `${entry.id}${inventory.configured && !entry.enabled ? ' · upstream disabled' : ''}`); option.value = entry.id; option.selected = selected.includes(entry.id); $(id).append(option); }
+}
+const routingInventories = new Map();
+const projectRouting = project => project?.routing || { default_upstream: project?.upstream_profile || 'default', model_overrides: {} };
+const routingProfiles = config => [...new Set([config.default_upstream, ...Object.values(config.model_overrides)].filter(Boolean))];
+function routingSummary(project) {
+  const config = projectRouting(project); const count = Object.keys(config.model_overrides).length;
+  return config.default_upstream ? `Default: ${config.default_upstream}` : `Explicit routes only · ${count}`;
+}
+function routingDetail(project) {
+  const config = projectRouting(project); const overrides = Object.entries(config.model_overrides);
+  return overrides.length ? overrides.map(([model, profile]) => `${model} → ${profile}`).join('; ') : config.default_upstream ? 'All models use the default account' : 'No models routed';
+}
+function profileLabel(id) {
+  const account = state.accounts.find(a => a.profile_id === id);
+  const profile = state.profiles.find(p => p.profile_id === id);
+  return `${account?.display_name || id} · ${profile?.provider || profile?.backend || 'unavailable'}${account?.display_name ? ` (${id})` : ''}`;
+}
+function profileOptions(select, selected, allowNone = false, eligible = null) {
+  select.replaceChildren();
+  if (allowNone) { const option = element('option', 'No default — explicit routes only'); option.value = ''; select.append(option); }
+  const ids = eligible || state.profiles.map(p => p.profile_id);
+  if (selected && !ids.includes(selected)) ids.push(selected);
+  for (const id of ids) {
+    const option = element('option', profileLabel(id) + (!state.profiles.some(p => p.profile_id === id) ? ' · unavailable' : eligible && !routeEligible(id, select.dataset.model) ? ' · model disabled' : ''));
+    option.value = id; select.append(option);
+  }
+  if (!ids.length && !allowNone) { const option = element('option', 'No account enables this model'); option.value = ''; select.append(option); }
+  select.value = selected || ''; if (!select.value && !allowNone && select.options.length) select.selectedIndex = 0;
+}
+function routeEligible(profile, model) {
+  const inventory = routingInventories.get(profile);
+  return inventory && !inventory.unavailable && (!inventory.configured || inventory.models.some(m => m.id === model && m.enabled && (m.manual || m.discovered) && m.discovered?.lifecycle !== 'retired'));
+}
+async function loadRoutingInventories() {
+  const entries = await Promise.all(state.profiles.map(async p => {
+    try {
+      const inventory = await api(inventoryPath(p.profile_id));
+      if (!inventory.configured) {
+        const catalog = await api(inventoryPath(p.profile_id) + '/available');
+        inventory.models = catalog.items.map(m => ({ id: m.id, enabled: true, discovered: m }));
+      }
+      return [p.profile_id, inventory];
+    } catch (_) { return [p.profile_id, { configured: true, models: [], unavailable: true }]; }
+  }));
+  routingInventories.clear(); for (const [id, inventory] of entries) routingInventories.set(id, inventory);
+  $('route-model-options').replaceChildren();
+  for (const id of [...new Set(entries.flatMap(([, i]) => i.models.map(m => m.id)))].sort()) { const option = element('option'); option.value = id; $('route-model-options').append(option); }
+}
+function addRouteRow(model = '', profile = '') {
+  const row = element('div', undefined, 'route-row');
+  const modelLabel = element('label', 'Model ID'); const input = element('input'); input.className = 'route-model'; input.value = model; input.required = true; input.maxLength = 200; input.setAttribute('list', 'route-model-options'); input.placeholder = 'Select or enter an exact model ID'; modelLabel.append(input);
+  const profileLabelElement = element('label', 'Upstream account'); const select = element('select'); select.className = 'route-profile'; select.required = true; profileLabelElement.append(select);
+  function choices() { select.dataset.model = input.value.trim(); profileOptions(select, select.value || profile, false, state.profiles.filter(p => routeEligible(p.profile_id, input.value.trim())).map(p => p.profile_id)); }
+  choices();
+  const remove = button('Remove', async () => { row.remove(); await routingChanged(); }); remove.type = 'button';
+  row.append(modelLabel, profileLabelElement, remove); $('project-routes').append(row);
+  input.addEventListener('change', () => task(null, async () => { choices(); await routingChanged(); }, 'project-form-error'));
+  select.addEventListener('change', () => task(null, routingChanged, 'project-form-error'));
+}
+function draftRouting() {
+  const model_overrides = {};
+  for (const row of $('project-routes').children) {
+    const model = row.querySelector('.route-model').value.trim(); const profile = row.querySelector('.route-profile').value;
+    if (!model || !profile) throw new Error('Each route needs a model ID and an available account.');
+    if (Object.hasOwn(model_overrides, model)) throw new Error(`Duplicate route for ${model}.`);
+    model_overrides[model] = profile;
+  }
+  return { default_upstream: $('project-profile').value || null, model_overrides };
+}
+function combinedInventory(config) {
+  const models = new Map();
+  for (const profile of routingProfiles(config)) for (const entry of routingInventories.get(profile)?.models || []) {
+    const destination = config.model_overrides[entry.id] || config.default_upstream;
+    if (destination === profile) models.set(entry.id, entry);
+  }
+  for (const id of Object.keys(config.model_overrides)) if (!models.has(id)) models.set(id, { id });
+  return { configured: false, models: [...models.values()] };
+}
+async function projectModelOptions(policy = null) {
+  const inventory = combinedInventory(draftRouting());
+  modelOptions('project-model-allowed', inventory, policy?.allowed || []); modelOptions('project-model-blocked', inventory, policy?.blocked || []);
+  text('project-model-note', 'Blocks win. An empty explicit allowlist denies all. Routing does not change these permissions. Changes affect every project token.');
+}
+async function routingChanged() {
+  await projectModelOptions({ allowed: selectedModels('project-model-allowed'), blocked: selectedModels('project-model-blocked') });
+  await projectModelPreview();
+}
+$('project-profile').addEventListener('change', () => task(null, routingChanged, 'project-form-error'));
+$('add-model-route').addEventListener('click', () => addRouteRow());
+async function tokenModelOptions(project, token) {
+  await loadRoutingInventories(); const inventory = combinedInventory(projectRouting(project));
+  modelOptions('token-models', inventory, token?.models || []); modelOptions('token-model-blocked', inventory, token?.blocked_models || []);
+  text('token-model-note', 'Blocks win. Tokens inherit project routing and cannot expand its model ceiling. Existing unavailable grants remain visible.');
+  await tokenModelPreview();
+}
+let previewGeneration = 0;
+async function tokenModelPreview() {
+  const generation = ++previewGeneration;
+  const project = state.projects.find(p => p.project_id === state.tokenFormProject); if (!project) return;
+  const old = state.editingToken; const vertex = old ? !!old.exchange_only : $('token-type').value === 'vertex';
+  const catalog = $('token-catalog').checked; const hadCatalog = old && (old.catalog_models || old.vertex_catalog_models);
+  const result = await api('/model-access', 'POST', { routing: projectRouting(project), backends: old?.backends || [...new Set(projectProfiles(project).map(p => p.backend))], project_policy: project.model_policy || {}, models: selectedModels('token-models'), blocked_models: selectedModels('token-model-blocked'),
+    catalog_models: catalog && (hadCatalog ? old.catalog_models : !vertex), vertex_catalog_models: catalog && (hadCatalog ? old.vertex_catalog_models : vertex) });
+  if (generation !== previewGeneration) return;
+  text('token-model-effective', result.items.map(m => `${m.id} → ${m.upstream_profile || 'unrouted'}: ${m.reason || [m.messages ? 'Messages allowed' : null, m.vertex ? 'Vertex allowed' : null].filter(Boolean).join(', ')}`).join('\n'));
+}
+for (const id of ['token-models', 'token-model-blocked', 'token-catalog', 'token-type']) $(id).addEventListener('change', () => task(null, tokenModelPreview, 'token-form-error'));
+
 $('add-account').addEventListener('click', () => accountEditor());
 $('account-form').addEventListener('submit', event => { event.preventDefault(); task(event.submitter, saveAccount, 'account-form-error'); });
 $('login-form').addEventListener('submit', event => { event.preventDefault(); task(event.submitter, submitLoginCode, 'login-error'); });
@@ -529,7 +711,7 @@ $('copy-login-url').addEventListener('click', event => task(event.currentTarget,
   else { $('login-url').focus(); $('login-url').select(); }
 }, 'login-error'));
 $('login-dialog').addEventListener('close', () => clearLogin(true));
-$('add-project').addEventListener('click', () => projectEditor());
+$('add-project').addEventListener('click', event => task(event.currentTarget, () => projectEditor()));
 $('project-form').addEventListener('submit', event => { event.preventDefault(); task(event.submitter, saveProject, 'project-form-error'); });
 $('token-project').addEventListener('change', event => task(event.currentTarget, loadTokens));
 $('issue-token').addEventListener('click', () => tokenEditor());
@@ -553,3 +735,14 @@ const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
 const local = new Date(yesterday.getTime() - yesterday.getTimezoneOffset() * 60 * 1000);
 $('filter-from').defaultValue = local.toISOString().slice(0, 16);
 $('admin-key').focus();
+
+let projectPreviewGeneration = 0;
+async function projectModelPreview() {
+  const generation = ++projectPreviewGeneration;
+  const policy = { allowed: $('project-model-mode').value === 'inherit' ? null : selectedModels('project-model-allowed'), blocked: selectedModels('project-model-blocked') };
+  const result = await api('/model-access', 'POST', { routing: draftRouting(), project_policy: policy, catalog_models: true, vertex_catalog_models: true });
+  if (generation !== projectPreviewGeneration) return;
+  const config = draftRouting(); text('project-routing-note', config.default_upstream ? `Default: ${profileLabel(config.default_upstream)} · ${Object.keys(config.model_overrides).length} overrides` : `Explicit routes only · ${Object.keys(config.model_overrides).length} routes`);
+  text('project-model-effective', result.items.map(m => `${m.id} → ${m.upstream_profile || 'unrouted'}: ${m.reason || 'policy permits'}`).join('\n'));
+}
+for (const id of ['project-model-mode', 'project-model-allowed', 'project-model-blocked']) $(id).addEventListener('change', () => task(null, projectModelPreview, 'project-form-error'));

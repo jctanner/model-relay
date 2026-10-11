@@ -25,6 +25,10 @@ fn yes() -> bool {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Project {
+    #[serde(default)]
+    pub routing: Option<crate::routing::Routing>,
+    #[serde(default)]
+    pub model_policy: Option<crate::model_policy::ProjectPolicy>,
     pub project_id: String,
     pub display_name: String,
     #[serde(default = "yes")]
@@ -35,8 +39,17 @@ pub struct Project {
     pub upstream_profile: String,
 }
 impl Project {
+    pub fn effective_routing(&self) -> crate::routing::Routing {
+        self.routing
+            .clone()
+            .unwrap_or_else(|| crate::routing::Routing {
+                default_upstream: Some(self.upstream_profile.clone()),
+                model_overrides: BTreeMap::new(),
+            })
+    }
     fn validate(&self) -> Result<(), ApiError> {
-        if !valid_id(&self.project_id)
+        if self.model_policy.as_ref().is_some_and(|p| !p.validate())
+            || !valid_id(&self.project_id)
             || self.display_name.is_empty()
             || self.display_name.len() > 200
             || self.display_name.chars().any(char::is_control)
@@ -95,6 +108,7 @@ pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS project_credentials (key_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, payload TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS credentials_project ON project_credentials(project_id);
         CREATE INDEX IF NOT EXISTS telemetry_project ON requests(json_extract(payload,'$.project_id'), sequence);
+        CREATE TABLE IF NOT EXISTS model_inventories (profile_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS upstream_accounts (account_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS control_migrations (version INTEGER PRIMARY KEY);")?;
     let transaction = connection.unchecked_transaction()?;
@@ -104,6 +118,8 @@ pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         |r| r.get::<_, bool>(0),
     )? {
         let project = Project {
+            routing: None,
+            model_policy: Default::default(),
             project_id: DEFAULT_PROJECT.into(),
             display_name: "Built-in development project".into(),
             enabled: true,
@@ -288,12 +304,20 @@ async fn detail(State(app): State<App>, Path(id): Path<String>) -> Result<Json<V
 }
 async fn create(
     State(app): State<App>,
-    Json(project): Json<Project>,
+    Json(mut project): Json<Project>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     project.validate()?;
-    let managed = validate_profile(&app, &project.upstream_profile)?;
+    if let Some(routing) = &mut project.routing {
+        routing.normalize(&app)?;
+    }
+    let profiles = project
+        .effective_routing()
+        .profiles()
+        .into_iter()
+        .map(|id| validate_profile(&app, &id).map(|managed| (id, managed)))
+        .collect::<Result<Vec<_>, _>>()?;
     app.store.control(true,move |c| {
-        validate_managed_profile(c, &project.upstream_profile, managed)?;
+        for (profile, managed) in &profiles { validate_managed_profile(c, profile, *managed)?; }
         let exists: bool=sql(c.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE project_id=?1 AND deleted=0)",[&project.project_id],|r|r.get(0)))?;
         if exists { return Err(conflict()); }
         sql(c.execute("INSERT INTO projects(project_id,payload,epoch,deleted) VALUES (?1,?2,?3,0) ON CONFLICT(project_id) DO UPDATE SET payload=excluded.payload,epoch=excluded.epoch,deleted=0",params![project.project_id,encode(&project),uuid::Uuid::new_v4().to_string()]))?;
@@ -303,18 +327,39 @@ async fn create(
 async fn update(
     State(app): State<App>,
     Path(id): Path<String>,
-    Json(project): Json<Project>,
+    Json(mut project): Json<Project>,
 ) -> Result<Json<Value>, ApiError> {
     project.validate()?;
-    let managed = validate_profile(&app, &project.upstream_profile)?;
+    if let Some(routing) = &mut project.routing {
+        routing.normalize(&app)?;
+    }
+    let profiles = project
+        .effective_routing()
+        .profiles()
+        .into_iter()
+        .map(|id| validate_profile(&app, &id).map(|managed| (id, managed)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let static_profiles = app
+        .upstreams
+        .keys()
+        .cloned()
+        .chain(["default".into()])
+        .collect::<std::collections::BTreeSet<_>>();
     if project.project_id != id {
         return Err(ApiError::bad("Project ID is immutable"));
     }
     app.store.control(true,move |c| {
-        validate_managed_profile(c, &project.upstream_profile, managed)?;
+        for (profile, managed) in &profiles { validate_managed_profile(c, profile, *managed)?; }
         let (previous,_)=load(c,&id)?;
+        if project.model_policy.is_none() { project.model_policy = previous.model_policy; }
+        if project.routing.is_none() { project.routing = previous.routing.clone(); }
+        // Revalidate preserved routes inside the write transaction too.
+        for profile in project.effective_routing().profiles() {
+            let managed = !static_profiles.contains(&profile);
+            validate_managed_profile(c, &profile, managed)?;
+        }
         // Disabling changes the incarnation so re-enabling cannot revive issued tokens.
-        sql(c.execute("UPDATE projects SET payload=?2,epoch=CASE WHEN ?3 THEN ?4 ELSE epoch END WHERE project_id=?1",params![id,encode(&project),(previous.enabled && !project.enabled) || previous.upstream_profile != project.upstream_profile,uuid::Uuid::new_v4().to_string()]))?;
+        sql(c.execute("UPDATE projects SET payload=?2,epoch=CASE WHEN ?3 THEN ?4 ELSE epoch END WHERE project_id=?1",params![id,encode(&project),(previous.enabled && !project.enabled) || (project.routing.is_none() && previous.upstream_profile != project.upstream_profile),uuid::Uuid::new_v4().to_string()]))?;
         Ok(Json(json!(project)))
     }).await
 }
@@ -345,6 +390,8 @@ struct CredentialInput {
     ephemeral: bool,
     #[serde(default)]
     models: Vec<String>,
+    #[serde(default)]
+    blocked_models: Option<Vec<String>>,
     #[serde(default)]
     backends: Vec<String>,
     #[serde(default)]
@@ -385,13 +432,18 @@ impl CredentialInput {
                 .client_id
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            || !crate::model_policy::valid_ids(&self.models)
+            || self
+                .blocked_models
+                .as_ref()
+                .is_some_and(|ids| !crate::model_policy::valid_ids(ids))
             || self.models.len() > 1000
             || self.models.iter().any(|s| {
                 s.is_empty()
                     || s.len() > 200
                     || !s
                         .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"@._-".contains(&b))
+                        .all(|b| b.is_ascii_alphanumeric() || b"/@._-".contains(&b))
             })
             || self.backends.len() > 2
             || self
@@ -411,6 +463,7 @@ impl CredentialInput {
             ephemeral,
             name,
             models: self.models,
+            blocked_models: self.blocked_models.unwrap_or_default(),
             backends: self.backends,
             catalog_models: self.catalog_models,
             vertex_catalog_models: self.vertex_catalog_models,
@@ -669,6 +722,9 @@ async fn update_credential(
             let old = get_key(c, &project, &id)?;
             // An older admin client omitting this field must not reopen direct access.
             input.exchange_only |= old.exchange_only;
+            if input.blocked_models.is_none() {
+                input.blocked_models = Some(old.blocked_models);
+            }
             let key = input.key(
                 project,
                 id.clone(),
@@ -784,18 +840,13 @@ fn validate_profile(app: &App, id: &str) -> Result<bool, ApiError> {
         Err(ApiError::bad("Unknown upstream profile"))
     }
 }
-pub(crate) struct Selection {
-    pub backend: crate::backend::Backend,
-    pub profile_id: String,
-}
-pub(crate) async fn backend_for_key(app: &App, key: &auth::Key) -> Result<Selection, ApiError> {
+pub(crate) async fn project_for_key(app: &App, key: &auth::Key) -> Result<Project, ApiError> {
     let id = key
         .project_id
         .clone()
         .unwrap_or_else(|| DEFAULT_PROJECT.into());
     let epoch = key.project_epoch.clone();
-    let project = app
-        .store
+    app.store
         .control(false, move |c| {
             let (project, current_epoch) = load(c, &id)?;
             if !project.enabled || current_epoch != epoch {
@@ -803,36 +854,19 @@ pub(crate) async fn backend_for_key(app: &App, key: &auth::Key) -> Result<Select
             }
             Ok(project)
         })
-        .await?;
-    let backend = if project.upstream_profile == "default" {
-        app.backend.clone()
-    } else {
-        app.upstreams
-            .get(&project.upstream_profile)
-            .cloned()
-            .or_else(|| {
-                app.accounts
-                    .as_ref()
-                    .and_then(|m| m.backend(&project.upstream_profile))
-            })
-            .ok_or(ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "upstream_profile_unavailable",
-                "Project upstream profile is unavailable",
-            ))?
-    };
-    if !key.backends.iter().any(|b| b == backend.name()) {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "permission_error",
-            "Model/backend access denied",
-        ));
-    }
-    Ok(Selection {
-        backend,
-        profile_id: project.upstream_profile,
-    })
+        .await
 }
+pub(crate) async fn authenticate_model(
+    app: App,
+    headers: &HeaderMap,
+    model: &str,
+) -> Result<(App, auth::Key, auth::Identity), ApiError> {
+    let (app, key, mut identity) = authenticate(app, headers).await?;
+    let (app, profile) = crate::routing::select(app, model)?;
+    identity.upstream_profile = profile;
+    Ok((app, key, identity))
+}
+
 pub(crate) async fn authenticate(
     app: App,
     headers: &HeaderMap,
@@ -853,14 +887,17 @@ async fn authenticate_for(
     exchange: bool,
 ) -> Result<(App, auth::Key, auth::Identity), ApiError> {
     let registry = crate::models::registry(&app).await?;
-    let (key, mut identity) = if exchange {
+    let (key, identity) = if exchange {
         auth::authenticate_exchange_key(headers, &registry, app.mock_adc.as_deref())?
     } else {
         auth::authenticate_key(headers, &registry, "", app.mock_adc.as_deref())?
     };
-    let selection = backend_for_key(&app, key).await?;
-    app.backend = selection.backend;
-    identity.upstream_profile = selection.profile_id;
+    let project = project_for_key(&app, key).await?;
+    app.routing = Some(
+        crate::routing::context(&app, project.effective_routing(), key.backends.clone()).await?,
+    );
+    app.inventory = None;
+    app.project_policy = project.model_policy.unwrap_or_default();
     Ok((app, key.clone(), identity))
 }
 
@@ -937,33 +974,31 @@ async fn auth_status(
         .store
         .control(false, move |c| Ok(load(c, &project)?.0))
         .await?;
-    let backend = if p.upstream_profile == "default" {
-        app.backend.clone()
-    } else {
-        app.upstreams
-            .get(&p.upstream_profile)
-            .cloned()
-            .or_else(|| {
-                app.accounts
-                    .as_ref()
-                    .and_then(|m| m.backend(&p.upstream_profile))
-            })
-            .ok_or(ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "upstream_profile_unavailable",
-                "Project upstream profile is unavailable",
-            ))?
-    };
-    let state = match &backend {
-        crate::backend::Backend::Mock => json!({"mode":"none","state":"mock"}),
-        crate::backend::Backend::Anthropic(u) => u.credentials.status().await,
-    };
+    let config = p.effective_routing();
+    let mut items = Vec::new();
+    for profile in config.profiles() {
+        if let Some(backend) = crate::routing::backend(&app, &profile) {
+            let state = match &backend {
+                crate::backend::Backend::Mock => json!({"mode":"none","state":"mock"}),
+                crate::backend::Backend::Anthropic(u) => u.credentials.status().await,
+            };
+            items.push(json!({"upstream_profile":profile,"backend":backend.name(),"synthetic":backend.synthetic(),"upstream_auth":state}));
+        } else {
+            items.push(json!({"upstream_profile":profile,"upstream_auth":{"state":"unavailable"}}));
+        }
+    }
+    let default = items
+        .iter()
+        .find(|v| v["upstream_profile"].as_str() == config.default_upstream.as_deref())
+        .cloned()
+        .unwrap_or(json!({}));
     Ok(Json(
-        json!({"project_id":p.project_id,"enabled":p.enabled,"upstream_profile":p.upstream_profile,"backend":backend.name(),"synthetic":backend.synthetic(),"upstream_auth":state}),
+        json!({"project_id":p.project_id,"enabled":p.enabled,"routing":config,"upstreams":items,
+        "upstream_profile":config.default_upstream,"backend":default["backend"],"synthetic":default["synthetic"],"upstream_auth":default["upstream_auth"]}),
     ))
 }
 async fn profiles(State(app): State<App>) -> Json<Value> {
-    let info = |id: &str, b: &crate::backend::Backend| json!({"profile_id":id,"backend":b.name(),"synthetic":b.synthetic(),"auth_mode":match b {crate::backend::Backend::Mock=>"none",crate::backend::Backend::Anthropic(u)=>u.credentials.kind()}});
+    let info = |id: &str, b: &crate::backend::Backend| json!({"profile_id":id,"backend":b.name(),"provider":match b {crate::backend::Backend::Mock=>"mock",crate::backend::Backend::Anthropic(u)=>u.provider},"synthetic":b.synthetic(),"auth_mode":match b {crate::backend::Backend::Mock=>"none",crate::backend::Backend::Anthropic(u)=>u.credentials.kind()}});
     let mut items = vec![info("default", &app.backend)];
     items.extend(app.upstreams.iter().map(|(id, b)| info(id, b)));
     if let Some(manager) = &app.accounts {
@@ -984,6 +1019,9 @@ mod tests {
         let registry = dir.join("keys.json");
         std::fs::write(&registry,json!({"keys":[{"client_id":"legacy","key_id":"legacy-key","sha256":auth::fingerprint("legacy-secret"),"models":["claude-fixture"],"backends":["mock"],"mock_adc":true}]}).to_string()).unwrap();
         App {
+            routing: None,
+            inventory: None,
+            project_policy: Default::default(),
             accounts: None,
             backend: Backend::Mock,
             upstreams: Arc::new(BTreeMap::from([("second-account".into(), Backend::Mock)])),
@@ -1414,6 +1452,7 @@ mod tests {
         assert_eq!(parse_duration("-1h"), None);
 
         let regular = CredentialInput {
+            blocked_models: None,
             client_id: "client".into(),
             token_type: Some("maas".into()),
             name: Some("regular".into()),

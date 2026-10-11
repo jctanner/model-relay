@@ -17,6 +17,7 @@ const SKEW_MS: i64 = 60_000;
 
 #[derive(Clone)]
 pub enum Credentials {
+    ManagedToken(PathBuf),
     BearerFile(PathBuf),
     ClaudeOAuth(Arc<OAuth>),
 }
@@ -46,12 +47,31 @@ fn bounded_file(path: &Path, limit: u64) -> Result<String, ApiError> {
 impl Credentials {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::ManagedToken(_) => "api-token",
             Self::BearerFile(_) => "bearer-file",
             Self::ClaudeOAuth(_) => "claude-oauth",
         }
     }
     pub async fn token(&self) -> Result<String, ApiError> {
         match self {
+            Self::ManagedToken(path) => {
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || {
+                    let parent = path.parent().ok_or_else(ApiError::internal)?;
+                    let info = std::fs::symlink_metadata(parent)
+                        .map_err(|_| auth_error("upstream_auth_missing"))?;
+                    private_file(&path, info.uid())?;
+                    let value: Value = serde_json::from_str(&bounded_file(&path, MAX_STORE)?)
+                        .map_err(|_| auth_error("upstream_auth_invalid"))?;
+                    let token = value["token"]
+                        .as_str()
+                        .filter(|t| valid_token(t))
+                        .ok_or_else(|| auth_error("upstream_auth_invalid"))?;
+                    Ok(token.to_owned())
+                })
+                .await
+                .map_err(|_| ApiError::internal())?
+            }
             Self::BearerFile(path) => {
                 let path = path.clone();
                 tokio::task::spawn_blocking(move || {
@@ -75,8 +95,8 @@ impl Credentials {
     }
     pub async fn status(&self) -> Value {
         match self {
-            Self::BearerFile(_) => {
-                json!({"mode":"bearer-file","state":if self.token().await.is_ok() {"ready"} else {"unavailable"}})
+            Self::BearerFile(_) | Self::ManagedToken(_) => {
+                json!({"mode":self.kind(),"state":if self.token().await.is_ok() {"ready"} else {"unavailable"}})
             }
             Self::ClaudeOAuth(oauth) => oauth.status().await,
         }
