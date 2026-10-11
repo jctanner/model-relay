@@ -386,7 +386,8 @@ Only the proxy mounts that file. HTTP origins require the explicit
 `SHIM_UPSTREAM_SYNTHETIC=true` fixture setting. Redirects and environment HTTP
 proxies are disabled. Set `SHIM_UPSTREAM_WORKSPACE` if your credential requires a
 workspace header; the client cannot override it. The total upstream timeout is
-`SHIM_UPSTREAM_TIMEOUT_SECONDS` (default 120, range 1–600).
+`SHIM_UPSTREAM_TIMEOUT_SECONDS` (default 120, range 1–600). Managed upstream
+profiles use the same setting.
 
 The model registry must supply `upstream_model` for each configured Vertex ID;
 the default maps `claude-sonnet-4-5@20250929` to `claude-sonnet-4-5-20250929`.

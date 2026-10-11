@@ -43,12 +43,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 token_file,
                 synthetic,
                 env::var("SHIM_UPSTREAM_WORKSPACE").ok(),
-                std::time::Duration::from_secs(
-                    env::var("SHIM_UPSTREAM_TIMEOUT_SECONDS")
-                        .unwrap_or_else(|_| "120".into())
-                        .parse::<u64>()?
-                        .clamp(1, 600),
-                ),
+                vertex_shim::backend::upstream_timeout()?,
             )?;
             if auth_mode == "claude-oauth" {
                 upstream = upstream.with_oauth(OAuth::new(env::var("SHIM_OAUTH_DIR")?.into())?);

@@ -269,6 +269,18 @@ pub(crate) async fn forward(
     Ok((status, headers, bytes).into_response())
 }
 
+/// Whole-request upstream timeout, streaming included: `SHIM_UPSTREAM_TIMEOUT_SECONDS`
+/// (default 120, clamped to 1–600). Both the environment-configured upstream and managed
+/// upstream profiles use it.
+pub fn upstream_timeout() -> Result<Duration, std::num::ParseIntError> {
+    Ok(Duration::from_secs(
+        std::env::var("SHIM_UPSTREAM_TIMEOUT_SECONDS")
+            .unwrap_or_else(|_| "120".into())
+            .parse::<u64>()?
+            .clamp(1, 600),
+    ))
+}
+
 #[derive(Clone)]
 pub struct Upstream {
     pub client: Client,

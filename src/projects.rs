@@ -889,7 +889,7 @@ impl UpstreamProfile {
             backend::{Backend, Upstream},
             credentials::OAuth,
         };
-        let timeout = std::time::Duration::from_secs(120);
+        let timeout = crate::backend::upstream_timeout()?;
         Ok(match self {
             Self::Mock => Backend::Mock,
             Self::BearerFile {
