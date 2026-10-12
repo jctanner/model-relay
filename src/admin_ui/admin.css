@@ -18,8 +18,9 @@ dialog{border:1px solid var(--border);border-radius:14px;padding:27px;width:480p
 #token-model-effective { white-space: pre-wrap; max-height: 14rem; overflow: auto; }
 select[multiple] { min-height: 7rem; }
 
+#project-dialog { width:960px; }
 .route-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; gap:12px; align-items:end; margin:12px 0; }
-.route-row label { min-width:0; }
-.route-row button { margin-bottom:2px; }
+.route-row label { min-width:0; margin-bottom:0; }
+.route-row button { min-height:40px; margin:0; padding:8px 12px; }
 .route-row input, .route-row select { width:100%; }
 @media (max-width:640px) { .route-row { grid-template-columns:1fr; } }

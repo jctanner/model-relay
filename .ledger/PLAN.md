@@ -2,6 +2,9 @@
 
 ## Completed work
 
+- [Project editor layout](tasks/done/project-editor-layout.md): deployed
+  2026-10-12; wider responsive modal and aligned route Remove controls.
+
 - [Project model routing](plans/project-model-routing.md) and
   [implementation evidence](tasks/done/project-model-routing.md). Deployed 2026-10-11.
 

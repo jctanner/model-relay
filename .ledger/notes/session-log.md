@@ -64,3 +64,11 @@ patterns. No secret values were printed. Recheck the exact staged tree and all
 outgoing commit objects before pushing. Formatting, JS syntax and diff checks
 passed; the existing 33-test and production validation evidence remains applicable
 because source files match the verified deployment fingerprint.
+
+## 2026-10-12: Project editor layout
+
+Widened project dialog from 560px to 960px with viewport cap; removed routing label
+bottom margins and aligned Remove height/padding with inputs. 33 tests, formatting,
+clippy and whitespace pass. Deployed via Breadboard make host-rebuild-relay;
+served CSS matches source, desktop/mobile browser checks pass and development
+project configuration is unchanged. No project save or paid inference.
