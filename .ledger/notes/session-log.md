@@ -72,3 +72,15 @@ bottom margins and aligned Remove height/padding with inputs. 33 tests, formatti
 clippy and whitespace pass. Deployed via Breadboard make host-rebuild-relay;
 served CSS matches source, desktop/mobile browser checks pass and development
 project configuration is unchanged. No project save or paid inference.
+
+## 2026-10-12: Provider model editor layout
+
+Corrected checkbox sizing inherited from generic inputs and widened the model
+dialog to 1200px. Four columns group model identity, display name, token limits
+and access controls. Explicit field selectors preserve draft values after the
+layout change. Desktop/mobile and 30-model browser checks passed, including
+draft edits, manual registration and empty overrides. JavaScript syntax, Rust
+formatting, all 33 tests, clippy and whitespace checks passed. Deployed through
+Breadboard make host-rebuild-relay; all three served assets match source and
+both provider inventories are unchanged. No policy save or paid inference.
+See [task](../tasks/done/provider-model-editor-layout.md).

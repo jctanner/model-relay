@@ -2,6 +2,9 @@
 
 ## Completed work
 
+- [Provider model editor layout](tasks/done/provider-model-editor-layout.md):
+  deployed 2026-10-12; compact checkboxes and four-column model rows in a wider modal.
+
 - [Project editor layout](tasks/done/project-editor-layout.md): deployed
   2026-10-12; wider responsive modal and aligned route Remove controls.
 

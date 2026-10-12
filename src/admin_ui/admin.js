@@ -549,7 +549,8 @@ function collectInventory() {
   if (!modelEditor) return;
   for (const row of $('models-rows').children) {
     const entry = modelEditor.inventory.models.find(m => m.id === row.dataset.id);
-    const [enabled, name, input, output, manual] = row.querySelectorAll('input');
+    const field = name => row.querySelector(`[data-field="${name}"]`);
+    const enabled = field('enabled'), name = field('display_name'), input = field('max_input_tokens'), output = field('max_tokens'), manual = field('manual');
     entry.enabled = enabled.checked; entry.display_name = name.value.trim() || null;
     entry.max_input_tokens = input.value ? Number(input.value) : null;
     entry.max_tokens = output.value ? Number(output.value) : null; entry.manual = manual.checked;
@@ -561,11 +562,14 @@ function renderInventory() {
   $('models-rows').replaceChildren();
   for (const entry of inventory.models) {
     const row = element('tr'); row.dataset.id = entry.id;
-    const enabled = element('input'); enabled.type = 'checkbox'; enabled.checked = entry.enabled;
-    const name = element('input'); name.value = entry.display_name || ''; name.placeholder = entry.discovered?.display_name || entry.id; name.maxLength = 200;
-    const limit = (override, discovered) => { const input = element('input'); input.type = 'number'; input.min = '1'; input.step = '1'; input.value = override ?? ''; input.placeholder = discovered == null ? 'Unknown' : String(discovered); return input; };
-    const manual = element('input'); manual.type = 'checkbox'; manual.checked = entry.manual;
-    row.append(cell(enabled), cell(lines(entry.id, entry.discovered ? 'Discovered' : entry.manual ? 'Manual' : 'Unavailable', true)), cell(name), cell(limit(entry.max_input_tokens, entry.discovered?.max_input_tokens)), cell(limit(entry.max_tokens, entry.discovered?.max_tokens)), cell(manual));
+    const enabled = element('input'); enabled.type = 'checkbox'; enabled.dataset.field = 'enabled'; enabled.checked = entry.enabled; enabled.setAttribute('aria-label', `Enable ${entry.id}`);
+    const name = element('input'); name.type = 'text'; name.dataset.field = 'display_name'; name.value = entry.display_name || ''; name.placeholder = entry.discovered?.display_name || entry.id; name.maxLength = 200; name.setAttribute('aria-label', `Display name for ${entry.id}`);
+    const limit = (field, caption, override, discovered) => { const label = element('label', caption); const input = element('input'); input.type = 'number'; input.dataset.field = field; input.min = '1'; input.step = '1'; input.value = override ?? ''; input.placeholder = discovered == null ? 'Unknown' : String(discovered); input.setAttribute('aria-label', `${caption} token limit for ${entry.id}`); label.append(input); return label; };
+    const limits = element('div', undefined, 'model-limits'); limits.append(limit('max_input_tokens', 'Input', entry.max_input_tokens, entry.discovered?.max_input_tokens), limit('max_tokens', 'Output', entry.max_tokens, entry.discovered?.max_tokens));
+    const manual = element('input'); manual.type = 'checkbox'; manual.dataset.field = 'manual'; manual.checked = entry.manual; manual.setAttribute('aria-label', `Manual entry for ${entry.id}`);
+    const access = element('div', undefined, 'model-access'); const enabledLabel = element('label'), manualLabel = element('label'); enabledLabel.append(enabled, 'Enabled'); manualLabel.append(manual, 'Manual'); access.append(enabledLabel, manualLabel);
+    const model = lines(entry.id, entry.discovered ? 'Discovered' : entry.manual ? 'Manual' : 'Unavailable', true); model.classList.add('model-identity');
+    row.append(cell(model), cell(name), cell(limits), cell(access));
     $('models-rows').append(row);
   }
 }

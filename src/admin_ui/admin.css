@@ -13,8 +13,26 @@ dialog{border:1px solid var(--border);border-radius:14px;padding:27px;width:480p
 
 .button-link{display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);border-radius:7px;padding:9px 15px;text-decoration:none;font-weight:600;color:var(--ink)}.button-link:hover{background:#edf1eb}.login-steps{padding-left:20px;color:var(--muted);font-size:13px}.login-steps li{margin-bottom:10px}#login-url{font-family:ui-monospace,SFMono-Regular,monospace;font-size:11px;overflow-wrap:anywhere}#login-form{margin-top:24px}.account-actions{flex-wrap:wrap;max-width:310px}@media(max-width:620px){.sidebar nav{flex-wrap:wrap}.nav-item{width:auto;flex:1 1 40%;font-size:12px}}
 
-#models-dialog input[type="number"] { width: 8rem; }
-#models-dialog input[type="text"], #models-dialog input:not([type]) { min-width: 12rem; }
+#models-dialog { width:1200px; }
+#models-dialog .table-scroll { max-height:50vh; margin-top:12px; }
+#models-dialog table { table-layout:fixed; min-width:900px; }
+#models-dialog th { position:sticky; top:0; z-index:1; }
+#models-dialog th:nth-child(1) { width:27%; }
+#models-dialog th:nth-child(2) { width:25%; }
+#models-dialog th:nth-child(3) { width:30%; }
+#models-dialog th:nth-child(4) { width:18%; }
+#models-dialog td { padding-top:6px; padding-bottom:6px; }
+#models-dialog .model-identity { white-space:normal; overflow-wrap:anywhere; }
+#models-dialog input[type="text"], #models-dialog input:not([type]), #models-dialog input[type="number"] { min-width:0; min-height:32px; padding:6px 8px; }
+.model-limits { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+.model-limits label { margin:0; font-size:10px; }
+.model-limits input { margin-top:3px; }
+.model-access { display:flex; flex-wrap:wrap; gap:8px 12px; }
+.model-access label { display:inline-flex; align-items:center; gap:6px; margin:0; font-size:12px; font-weight:400; }
+#models-dialog input[type="checkbox"] { width:16px; height:16px; min-height:0; padding:0; margin:0; flex:none; accent-color:var(--accent); }
+#manual-model-form { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:12px; margin-top:16px; }
+#manual-model-form label { margin:0; }
+@media (max-width:620px) { #models-dialog .actions { flex-wrap:wrap; } #manual-model-form { grid-template-columns:1fr; } #manual-model-form button { justify-self:start; } }
 #token-model-effective { white-space: pre-wrap; max-height: 14rem; overflow: auto; }
 select[multiple] { min-height: 7rem; }
 

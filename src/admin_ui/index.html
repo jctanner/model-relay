@@ -114,7 +114,7 @@
   <dialog id="models-dialog" class="wide-dialog">
     <div class="dialog-heading"><h2 id="models-title">Upstream models</h2><button class="icon-button" type="button" data-close="models-dialog">×</button></div>
     <p id="models-status" class="hint"></p><div class="actions"><button id="models-refresh" type="button">Refresh discovery</button><button id="models-reload" type="button">Reload saved policy</button></div>
-    <div class="table-scroll"><table><thead><tr><th>Enabled</th><th>Exact ID / source</th><th>Display name override</th><th>Input limit override</th><th>Output limit override</th><th>Manual entry</th></tr></thead><tbody id="models-rows"></tbody></table></div>
+    <div class="table-scroll"><table><thead><tr><th>Model / source</th><th>Display name</th><th>Token limits</th><th>Access</th></tr></thead><tbody id="models-rows"></tbody></table></div>
     <form id="manual-model-form"><label>Register exact model ID<input id="manual-model-id" maxlength="200" required></label><button type="submit">Add model</button></form>
     <p class="hint">Saving enables explicit model policy. An empty enabled set denies all models. New discoveries stay disabled. GLM requests use medium effort. Unknown limits remain unset.</p>
     <p id="models-error" class="form-error"></p><div class="dialog-footer"><button id="models-save" class="primary" type="button">Save policy</button></div>
