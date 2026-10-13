@@ -7,7 +7,7 @@ RUN rustup component add rustfmt clippy \
     && cargo fmt --all --check \
     && cargo test --locked \
     && cargo clippy --locked --all-targets -- -D warnings \
-    && SHIM_BUILD_ID="$(sha256sum Cargo.toml Cargo.lock src/*.rs src/admin_ui/* | sha256sum | cut -d ' ' -f1)" cargo build --locked --release
+    && SHIM_BUILD_ID="$(sha256sum Cargo.toml Cargo.lock src/*.rs src/telemetry/*.rs src/admin_ui/* | sha256sum | cut -d ' ' -f1)" cargo build --locked --release
 
 FROM docker.io/library/debian@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates curl libstdc++6 \

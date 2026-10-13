@@ -1,3 +1,5 @@
+mod reporting;
+
 use crate::{ApiError, auth::Identity};
 use chrono::Utc;
 use rusqlite::{Connection, params};
@@ -172,7 +174,8 @@ enum Write {
 
 // Queued writes above which streamed usage events are dropped. Request records are kept up to
 // the hard limit, so a burst loses intermediate usage snapshots before it loses any request.
-const EVENT_QUEUE_LIMIT: u64 = 1024;
+// Absorb synchronized usage bursts from hundreds of streams before shedding events.
+const EVENT_QUEUE_LIMIT: u64 = 8192;
 const REQUEST_QUEUE_LIMIT: u64 = 65536;
 // Writes taken from the queue per transaction.
 const WRITE_BATCH: usize = 512;
@@ -241,8 +244,10 @@ fn write_batch(connection: &mut Connection, batch: Vec<Write>, health: &Health) 
         let transaction = connection.transaction()?;
         {
             let mut insert = transaction.prepare_cached("INSERT INTO requests(request_id,payload) VALUES (?1,?2) ON CONFLICT(request_id) DO UPDATE SET payload=excluded.payload")?;
+            let mut metrics = transaction.prepare_cached(&reporting::upsert_sql())?;
             for (id, payload) in &requests {
                 insert.execute(params![id, payload])?;
+                metrics.execute(params![id])?;
             }
             let mut event = transaction.prepare_cached(
                 "INSERT OR REPLACE INTO events(request_id,sequence,payload) VALUES (?1,?2,?3)",
@@ -274,6 +279,8 @@ pub struct Store {
     health: Arc<Health>,
     readers: Arc<Semaphore>,
     controls: Arc<Semaphore>,
+    aggregates: Arc<Semaphore>,
+    aggregate_cache: Arc<reporting::Cache>,
 }
 
 impl Store {
@@ -286,6 +293,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS requests (sequence INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT UNIQUE NOT NULL, payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS events (request_id TEXT NOT NULL, sequence INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(request_id, sequence));")?;
         crate::projects::migrate(&connection)?;
+        reporting::migrate(&mut connection)?;
         // Unbounded so that request records are never refused; enqueue() bounds it by count.
         let (sender, mut receiver) = mpsc::unbounded_channel::<Write>();
         let health = Arc::new(Health::default());
@@ -310,6 +318,8 @@ impl Store {
             health,
             readers: Arc::new(Semaphore::new(4)),
             controls: Arc::new(Semaphore::new(4)),
+            aggregates: Arc::new(Semaphore::new(2)),
+            aggregate_cache: Arc::new(reporting::Cache::default()),
         })
     }
     fn enqueue(&self, write: Write) {
@@ -379,6 +389,28 @@ impl Store {
         .map_err(|_| ApiError::internal())?
         .map_err(|_| ApiError::internal())
     }
+    pub async fn aggregate(&self, filter: Filter) -> Result<Value, ApiError> {
+        filter.validate_aggregate()?;
+        let key = serde_json::to_string(&filter).expect("serializable filter");
+        if let Some(value) = self.aggregate_cache.get(&key) {
+            return Ok(value);
+        }
+        let _permit = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            self.aggregates.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| ApiError::busy())?
+        .map_err(|_| ApiError::internal())?;
+        if let Some(value) = self.aggregate_cache.get(&key) {
+            return Ok(value);
+        }
+        let result = self
+            .read(move |connection| reporting::aggregate(&filter, connection))
+            .await?;
+        self.aggregate_cache.insert(key, result.clone());
+        Ok(result)
+    }
     pub async fn control<T, F>(&self, write: bool, query: F) -> Result<T, ApiError>
     where
         T: Send + 'static,
@@ -428,7 +460,7 @@ impl Store {
     }
 }
 
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Filter {
     pub cursor: Option<u64>,
@@ -498,73 +530,21 @@ impl Filter {
         }
         Ok(())
     }
-    pub fn list(&self, connection: &Connection) -> rusqlite::Result<Value> {
-        let newest_first = self.order.as_deref() == Some("desc");
-        let text = "SELECT sequence,payload FROM requests WHERE sequence > ?1
-            AND (?2 IS NULL OR json_extract(payload,'$.run_id') = ?2)
-            AND (?3 IS NULL OR json_extract(payload,'$.client_id') = ?3)
-            AND (?4 IS NULL OR json_extract(payload,'$.key_id') = ?4)
-            AND (?5 IS NULL OR json_extract(payload,'$.backend') = ?5)
-            AND (?6 IS NULL OR json_extract(payload,'$.resolved_model') = ?6)
-            AND (?7 IS NULL OR json_extract(payload,'$.operation') = ?7)
-            AND (?8 IS NULL OR json_extract(payload,'$.usage_status') = ?8)
-            AND (?9 IS NULL OR json_extract(payload,'$.synthetic') = ?9)
-            AND (?10 IS NULL OR julianday(json_extract(payload,'$.started_at')) >= julianday(?10))
-            AND (?11 IS NULL OR julianday(json_extract(payload,'$.started_at')) <= julianday(?11))
-            AND (?13 IS NULL OR json_extract(payload,'$.project_id') = ?13)
-            ORDER BY sequence LIMIT ?12";
-        let text = if self.project_id.is_some() {
-            text.replace(
-                "(?13 IS NULL OR json_extract(payload,'$.project_id') = ?13)",
-                "json_extract(payload,'$.project_id') = ?13",
-            )
-        } else {
-            text.into()
-        };
-        let text = if newest_first {
-            text.replace("sequence > ?1", "sequence < ?1")
-                .replace("ORDER BY sequence", "ORDER BY sequence DESC")
-        } else {
-            text
-        };
-        let mut query = connection.prepare(&text)?;
-        let limit = self.limit.unwrap_or(100) as usize;
-        let rows = query.query_map(
-            params![
-                self.cursor
-                    .map(|c| c as i64)
-                    .unwrap_or(if newest_first { i64::MAX } else { 0 }),
-                self.run_id,
-                self.client_id,
-                self.key_id,
-                self.backend,
-                self.model,
-                self.operation,
-                self.usage_status,
-                self.synthetic,
-                self.from,
-                self.to,
-                (limit + 1) as i64,
-                self.project_id
-            ],
-            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
-        )?;
-        let mut values = Vec::new();
-        for row in rows {
-            values.push(row?);
+    pub fn validate_aggregate(&self) -> Result<(), ApiError> {
+        self.validate()?;
+        if self.cursor.is_some()
+            || self.limit.is_some()
+            || self.order.is_some()
+            || self.format.is_some()
+        {
+            return Err(ApiError::bad(
+                "Aggregates do not accept pagination or export options",
+            ));
         }
-        let has_more = values.len() > limit;
-        values.truncate(limit);
-        let cursor = if has_more {
-            values.last().map(|(seq, _)| *seq)
-        } else {
-            None
-        };
-        let items: Vec<Value> = values
-            .into_iter()
-            .map(|(_, value)| serde_json::from_str(&value).expect("valid stored JSON"))
-            .collect();
-        Ok(json!({"items":items,"next_cursor":cursor}))
+        Ok(())
+    }
+    pub fn list(&self, connection: &Connection) -> rusqlite::Result<Value> {
+        reporting::list(self, connection)
     }
 }
 
@@ -751,7 +731,7 @@ mod tests {
         let store = Store::open(&dir.path().join("t.sqlite")).unwrap();
         let record = sample("burst");
         // Far more writes than the event limit, enqueued faster than any writer drains them.
-        for i in 0..3000u32 {
+        for i in 0..(EVENT_QUEUE_LIMIT as u32 * 3) {
             store.event(&record, i, "SSE usage snapshot");
             store.request(&record);
         }
@@ -765,5 +745,323 @@ mod tests {
         if health["dropped_events"] != 0 {
             assert!(health["last_dropped_at_unix_ms"].as_u64().is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn aggregates_cover_history_and_replace_cumulative_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.sqlite")).unwrap();
+        for index in 0..150 {
+            let mut record = sample(&format!("r{index}"));
+            record.completion = "complete".into();
+            record.usage_status = "complete".into();
+            record.usage = json!({"output_tokens":3,"input_tokens":12});
+            store.request(&record);
+        }
+        let mut counted = sample("counting");
+        counted.operation = "count_tokens".into();
+        counted.merge_usage(&json!({"input_tokens":1000}));
+        store.request(&counted);
+        store.flush().await;
+        let first = store.aggregate(Filter::default()).await.unwrap();
+        assert_eq!(first["request_count"], 151);
+        assert_eq!(first["generation_tokens"]["output_tokens"], 450);
+        assert_eq!(first["generation_tokens"]["input_tokens"], 1800);
+        assert_eq!(first["counting_requests"], 1);
+        let page = store.read(|c| Filter::default().list(c)).await.unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 100);
+        let mut updated = sample("r0");
+        updated.usage = json!({"output_tokens":17,"input_tokens":12});
+        store.request(&updated);
+        store.flush().await;
+        let latest = store
+            .read(|c| reporting::aggregate(&Filter::default(), c))
+            .await
+            .unwrap();
+        assert_eq!(latest["request_count"], 151);
+        assert_eq!(latest["generation_tokens"]["output_tokens"], 464);
+        assert_eq!(latest["models"][0]["tokens"], 2264);
+        // Cache freshness is explicit; expiry incorporates later committed snapshots.
+        let cached = store.aggregate(Filter::default()).await.unwrap();
+        assert_eq!(cached["cached"], true);
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert_eq!(
+            store.aggregate(Filter::default()).await.unwrap()["generation_tokens"]["output_tokens"],
+            464
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_preserves_raw_records_and_sequences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE requests(sequence INTEGER PRIMARY KEY AUTOINCREMENT,request_id TEXT UNIQUE NOT NULL,payload TEXT NOT NULL)").unwrap();
+        let payload = serde_json::to_string(&sample("legacy")).unwrap();
+        connection
+            .execute(
+                "INSERT INTO requests(sequence,request_id,payload) VALUES(42,'legacy',?1)",
+                [&payload],
+            )
+            .unwrap();
+        drop(connection);
+        let store = Store::open(&path).unwrap();
+        let aggregate = store.aggregate(Filter::default()).await.unwrap();
+        assert_eq!(aggregate["request_count"], 1);
+        let persisted = store
+            .read(|c| {
+                let row = c.query_row(
+                    "SELECT sequence,payload FROM requests WHERE request_id='legacy'",
+                    [],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+                )?;
+                Ok(json!({"sequence":row.0,"payload":row.1}))
+            })
+            .await
+            .unwrap();
+        assert_eq!(persisted["sequence"], 42);
+        assert_eq!(persisted["payload"], payload);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.aggregate(Filter::default()).await.unwrap()["request_count"],
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn rollups_match_exact_time_ranges_and_status_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.sqlite")).unwrap();
+        let mut records = Vec::new();
+        for (index, timestamp) in [
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:20Z",
+            "2026-01-01T00:00:59.999Z",
+            "2026-01-01T00:01:00Z",
+            "2026-01-01T00:01:30Z",
+            "2026-01-01T00:02:00Z",
+            "2026-01-01T00:02:10Z",
+            "2026-01-01T00:02:59.999Z",
+            "2026-01-01T00:03:00Z",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut record = sample(&format!("edge{index}"));
+            record.started_at = timestamp.into();
+            record.usage = json!({"input_tokens": index+1,"output_tokens":3});
+            record.latency_ms = Some((index as u64 + 1) * 10);
+            store.request(&record);
+            records.push(record);
+        }
+        store.flush().await;
+        for (from, to, expected) in [
+            (None, None, 9),
+            (
+                Some("2026-01-01T00:00:20Z"),
+                Some("2026-01-01T00:02:10Z"),
+                6,
+            ),
+            (
+                Some("2026-01-01T00:00:20Z"),
+                Some("2026-01-01T00:00:59.999Z"),
+                2,
+            ),
+            (
+                Some("2026-01-01T00:01:00Z"),
+                Some("2026-01-01T00:02:00Z"),
+                3,
+            ),
+            (
+                Some("2026-01-01T00:01:00Z"),
+                Some("2026-01-01T00:01:00Z"),
+                1,
+            ),
+            (
+                Some("2026-01-01T01:01:00+01:00"),
+                Some("2026-01-01T01:02:00+01:00"),
+                3,
+            ),
+            (Some("2026-01-01T00:02:10Z"), None, 3),
+            (None, Some("2026-01-01T00:01:00Z"), 4),
+            (Some("2026-01-01T00:04:00Z"), None, 0),
+        ] {
+            let filter = Filter {
+                from: from.map(str::to_owned),
+                to: to.map(str::to_owned),
+                ..Default::default()
+            };
+            let selected = filter.clone();
+            let page = store.read(move |c| selected.list(c)).await.unwrap();
+            let aggregate = store.aggregate(filter).await.unwrap();
+            assert_eq!(aggregate["request_count"], expected, "{from:?} {to:?}");
+            assert_eq!(
+                aggregate["generation_tokens"],
+                summary(page)["generation_tokens"]
+            );
+        }
+        // Moving a request between cohorts must remove its old contribution,
+        // including old status, model, scope and latency.
+        let updated = &mut records[0];
+        updated.completion = "failed".into();
+        updated.usage_status = "partial".into();
+        updated.project_id = Some("other".into());
+        updated.resolved_model = "other-model".into();
+        updated.usage = json!({"input_tokens":99,"output_tokens":7});
+        updated.latency_ms = Some(1000);
+        store.request(updated);
+        store.flush().await;
+        let aggregate = store
+            .read(|c| reporting::aggregate(&Filter::default(), c))
+            .await
+            .unwrap();
+        assert_eq!(aggregate["request_count"], 9);
+        assert_eq!(aggregate["generation_tokens"]["input_tokens"], 143);
+        assert_eq!(aggregate["generation_tokens"]["output_tokens"], 31);
+        assert_eq!(aggregate["request_health"]["failed_cancelled"], 1);
+        assert_eq!(aggregate["request_health"]["in_progress"], 8);
+        assert_eq!(aggregate["request_health"]["mean_latency_ms"], 160);
+        let former = Filter {
+            project_id: Some(crate::projects::DEFAULT_PROJECT.into()),
+            ..Default::default()
+        };
+        let remaining = store
+            .read(move |c| reporting::aggregate(&former, c))
+            .await
+            .unwrap();
+        assert_eq!(remaining["request_count"], 8);
+        assert_eq!(remaining["generation_tokens"]["input_tokens"], 44);
+        assert_eq!(remaining["request_health"]["mean_latency_ms"], 55);
+    }
+
+    #[tokio::test]
+    async fn aggregate_scope_matches_paginated_scope_for_every_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.sqlite")).unwrap();
+        for index in 0..20 {
+            let mut record = sample(&format!("r{index}"));
+            let left = index < 10;
+            record.run_id = Some(if left { "alpha" } else { "beta" }.into());
+            record.project_id = Some(if left { "a" } else { "b" }.into());
+            record.client_id = if left { "ca" } else { "cb" }.into();
+            record.key_id = if left { "ka" } else { "kb" }.into();
+            record.backend = if left { "mock" } else { "anthropic" }.into();
+            record.resolved_model = if left { "ma" } else { "mb" }.into();
+            record.synthetic = left;
+            record.usage_status = if left { "complete" } else { "partial" }.into();
+            record.operation = if left {
+                "generation"
+            } else {
+                "stream_generation"
+            }
+            .into();
+            record.started_at = if left {
+                "2026-01-01T00:00:00Z"
+            } else {
+                "2026-01-02T00:00:00Z"
+            }
+            .into();
+            record.usage = json!({"output_tokens":index+1});
+            store.request(&record);
+        }
+        store.flush().await;
+        for filter in [
+            Filter::default(),
+            Filter {
+                run_id: Some("alpha".into()),
+                ..Default::default()
+            },
+            Filter {
+                project_id: Some("a".into()),
+                ..Default::default()
+            },
+            Filter {
+                client_id: Some("ca".into()),
+                ..Default::default()
+            },
+            Filter {
+                key_id: Some("ka".into()),
+                ..Default::default()
+            },
+            Filter {
+                backend: Some("mock".into()),
+                ..Default::default()
+            },
+            Filter {
+                model: Some("ma".into()),
+                ..Default::default()
+            },
+            Filter {
+                operation: Some("generation".into()),
+                ..Default::default()
+            },
+            Filter {
+                usage_status: Some("complete".into()),
+                ..Default::default()
+            },
+            Filter {
+                synthetic: Some(true),
+                ..Default::default()
+            },
+            Filter {
+                from: Some("2026-01-01T01:00:00+01:00".into()),
+                to: Some("2026-01-01T01:00:00+01:00".into()),
+                ..Default::default()
+            },
+            Filter {
+                project_id: Some("a".into()),
+                key_id: Some("ka".into()),
+                model: Some("ma".into()),
+                ..Default::default()
+            },
+            Filter {
+                project_id: Some("missing".into()),
+                ..Default::default()
+            },
+        ] {
+            let query = filter.clone();
+            let page = store.read(move |c| query.list(c)).await.unwrap();
+            let aggregate = store.aggregate(filter).await.unwrap();
+            assert_eq!(
+                aggregate["request_count"],
+                page["items"].as_array().unwrap().len()
+            );
+            assert_eq!(
+                aggregate["generation_tokens"],
+                summary(page)["generation_tokens"]
+            );
+        }
+        assert!(
+            Filter {
+                limit: Some(100),
+                ..Default::default()
+            }
+            .validate_aggregate()
+            .is_err()
+        );
+        assert!(
+            Filter {
+                cursor: Some(0),
+                ..Default::default()
+            }
+            .validate_aggregate()
+            .is_err()
+        );
+        assert!(
+            Filter {
+                order: Some("desc".into()),
+                ..Default::default()
+            }
+            .validate_aggregate()
+            .is_err()
+        );
+        assert!(
+            Filter {
+                format: Some("json".into()),
+                ..Default::default()
+            }
+            .validate_aggregate()
+            .is_err()
+        );
     }
 }

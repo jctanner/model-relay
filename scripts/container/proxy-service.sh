@@ -5,7 +5,7 @@ mkdir -p /cargo/registry
 # newer entries fetched into the persistent cache during development.
 cp -au /opt/cargo-registry/. /cargo/registry/
 mkdir -p /build/bin
-export SHIM_BUILD_ID=$(sha256sum Cargo.toml Cargo.lock src/*.rs src/admin_ui/* | sha256sum | cut -d ' ' -f1)
+export SHIM_BUILD_ID=$(sha256sum Cargo.toml Cargo.lock src/*.rs src/telemetry/*.rs src/admin_ui/* | sha256sum | cut -d ' ' -f1)
 cargo build --locked --offline
 install /build/target/debug/vertex-shim /build/bin/vertex-shim
 child=''

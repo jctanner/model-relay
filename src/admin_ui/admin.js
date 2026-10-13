@@ -2,7 +2,7 @@
 
 const $ = id => document.getElementById(id);
 const API = '/api/private/v1';
-const state = { key: '', session: 0, view: 'telemetry', projects: [], profiles: [], accounts: [], loginAvailable: false, managementEnabled: false, editingAccount: null, login: null, loginTimer: null, tokens: [], telemetryKeys: [], requests: [], cursor: null, query: '', telemetryLoad: 0, tokenLoad: 0, scopeLoad: 0, editingProject: null, editingToken: null, tokenFormProject: '', secretID: '', confirmation: null, requestID: '', events: [], eventCursor: null };
+const state = { key: '', session: 0, view: 'telemetry', projects: [], profiles: [], accounts: [], loginAvailable: false, managementEnabled: false, editingAccount: null, login: null, loginTimer: null, tokens: [], telemetryKeys: [], requests: [], aggregate: null, cursor: null, query: '', telemetryLoad: 0, tokenLoad: 0, scopeLoad: 0, editingProject: null, editingToken: null, tokenFormProject: '', secretID: '', confirmation: null, requestID: '', events: [], eventCursor: null };
 const number = value => Number(value || 0).toLocaleString();
 const time = value => value ? new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
 const text = (id, value) => { $(id).textContent = value; };
@@ -64,7 +64,7 @@ function disconnect() {
   state.key = ''; state.session++; state.telemetryLoad++; state.tokenLoad++; state.scopeLoad++;
   state.projects = []; state.profiles = []; state.accounts = []; state.editingAccount = null; state.tokens = []; state.telemetryKeys = []; state.requests = []; state.events = [];
   state.cursor = null; state.confirmation = null; state.editingProject = null; state.editingToken = null;
-  state.query = '';
+  state.query = ''; state.aggregate = null;
   state.requestID = ''; state.eventCursor = null; state.tokenFormProject = '';
   for (const dialog of document.querySelectorAll('dialog')) dialog.close();
   for (const form of [$('project-form'), $('token-form'), $('account-form')]) form.reset();
@@ -76,7 +76,7 @@ function disconnect() {
   $('telemetry-scope').title = '';
   for (const id of ['token-project', 'project-profile']) $(id).replaceChildren();
   for (const id of ['stat-requests', 'stat-input', 'stat-output', 'stat-cache']) text(id, '—');
-  for (const id of ['stat-request-note', 'stat-cache-note', 'request-scope', 'pagination-note', 'projects-note', 'tokens-note', 'token-project-note', 'updated-at', 'profile-count']) text(id, '');
+  for (const id of ['aggregate-scope', 'stat-request-note', 'stat-cache-note', 'request-scope', 'pagination-note', 'projects-note', 'tokens-note', 'token-project-note', 'updated-at', 'profile-count']) text(id, '');
   text('project-count', '0'); text('health-text', 'Disconnected');
   $('app').hidden = true; $('connect-screen').hidden = false; notice(''); $('admin-key').focus();
 }
@@ -186,8 +186,16 @@ function telemetryQuery() {
 async function loadTelemetry(more = false) {
   const load = ++state.telemetryLoad;
   const query = more ? state.query : telemetryQuery();
-  const page = await api(`/telemetry/requests?${query}${more && state.cursor !== null ? `&cursor=${state.cursor}` : ''}`);
+  const pageRequest = api(`/telemetry/requests?${query}${more && state.cursor !== null ? `&cursor=${state.cursor}` : ''}`);
+  let page, aggregate;
+  if (more) page = await pageRequest;
+  else {
+    const scope = new URLSearchParams(query);
+    for (const key of ['limit', 'cursor', 'order', 'format']) scope.delete(key);
+    [page, aggregate] = await Promise.all([pageRequest, api(`/telemetry/aggregate?${scope}`)]);
+  }
   if (load !== state.telemetryLoad) return;
+  if (!more) state.aggregate = aggregate;
   state.query = query;
   state.requests = more ? state.requests.concat(page.items) : page.items;
   state.cursor = page.next_cursor;
@@ -196,18 +204,14 @@ async function loadTelemetry(more = false) {
 
 function renderTelemetry() {
   const requests = state.requests;
-  const generated = requests.filter(request => request.operation !== 'count_tokens');
-  const total = field => generated.reduce((sum, request) => sum + Number(request.usage?.[field] || 0), 0);
-  text('stat-requests', number(requests.length)); text('stat-input', number(total('input_tokens'))); text('stat-output', number(total('output_tokens')));
+  const overview = state.aggregate;
+  const total = field => Number(overview.generation_tokens[field] || 0);
+  text('stat-requests', number(overview.request_count)); text('stat-input', number(total('input_tokens'))); text('stat-output', number(total('output_tokens')));
   text('stat-cache', number(total('cache_read_input_tokens') + total('cache_creation_input_tokens')));
   text('stat-cache-note', `${number(total('cache_read_input_tokens'))} read · ${number(total('cache_creation_input_tokens'))} created`);
-  text('stat-request-note', `${number(requests.filter(request => !request.synthetic).length)} provider · ${number(requests.filter(request => request.synthetic).length)} synthetic`);
-  const models = new Map();
-  for (const request of generated) {
-    const value = ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'].reduce((sum, key) => sum + Number(request.usage?.[key] || 0), 0);
-    models.set(request.resolved_model, (models.get(request.resolved_model) || 0) + value);
-  }
-  const ordered = [...models].sort((a, b) => b[1] - a[1]).slice(0, 5);
+  text('stat-request-note', `${number(overview.provider_requests)} provider · ${number(overview.synthetic_requests)} synthetic`);
+  text('aggregate-scope', `All matching requests · totals calculated ${time(overview.generated_at)}`);
+  const ordered = overview.models.map(item => [item.model, item.tokens]);
   $('model-bars').replaceChildren();
   if (!ordered.length) $('model-bars').append(element('p', 'No generation usage in this selection.', 'empty-inline'));
   for (const [model, count] of ordered) {
@@ -216,12 +220,11 @@ function renderTelemetry() {
     const bar = element('progress'); bar.max = Math.max(ordered[0][1], 1); bar.value = count; bar.setAttribute('aria-label', `${model}: ${number(count)} tokens`);
     row.append(heading, bar); $('model-bars').append(row);
   }
-  const latencies = requests.map(request => request.latency_ms).filter(value => value !== null && value !== undefined);
   const health = [
-    ['Completed', requests.filter(request => request.completion === 'complete').length],
-    ['Failed / cancelled', requests.filter(request => ['failed', 'cancelled'].includes(request.completion)).length],
-    ['Partial or unavailable usage', generated.filter(request => request.usage_status !== 'complete').length],
-    ['Mean latency', latencies.length ? `${number(Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length))} ms` : '—'],
+    ['Completed', overview.request_health.complete],
+    ['Failed / cancelled', overview.request_health.failed_cancelled],
+    ['Partial or unavailable usage', overview.generation_usage_counts.partial + overview.generation_usage_counts.unavailable],
+    ['Mean latency', overview.request_health.mean_latency_ms === null ? '—' : `${number(overview.request_health.mean_latency_ms)} ms`],
   ];
   $('request-health').replaceChildren(...health.map(([label, value]) => { const row = element('div'); row.append(element('dt', label), element('dd', typeof value === 'number' ? number(value) : value)); return row; }));
   $('request-rows').replaceChildren();
@@ -242,7 +245,7 @@ function renderTelemetry() {
     ); $('request-rows').append(row);
   }
   text('request-scope', `${number(requests.length)} loaded · newest loaded first`);
-  text('pagination-note', state.cursor !== null ? 'Older requests available. Totals cover the loaded requests, newest first.' : 'All matching requests loaded. Counting requests are excluded from token totals.');
+  text('pagination-note', state.cursor !== null ? 'Older requests available. Overview totals cover all matching requests.' : 'All matching requests loaded. Counting requests are excluded from token totals.');
   $('load-more').hidden = state.cursor === null; $('export-telemetry').disabled = !requests.length;
 }
 

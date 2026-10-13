@@ -138,6 +138,7 @@ pub fn admin(app: App) -> Router {
             get(events),
         )
         .route("/api/private/v1/telemetry/summary", get(summary))
+        .route("/api/private/v1/telemetry/aggregate", get(aggregate))
         .route("/api/private/v1/telemetry/export", get(export))
         .merge(projects::routes())
         .merge(accounts::routes())
@@ -571,6 +572,14 @@ async fn summary(
     Ok(Json(telemetry::summary(
         page(&app, &headers, filter).await?,
     )))
+}
+async fn aggregate(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Query(filter): Query<Filter>,
+) -> Result<Json<Value>, ApiError> {
+    auth::admin(&headers, &app.admin_verifier)?;
+    Ok(Json(app.store.aggregate(filter).await?))
 }
 async fn export(
     State(app): State<App>,

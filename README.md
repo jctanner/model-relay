@@ -605,7 +605,7 @@ distinct from the upstream account's subscription quota, which is not collected.
 
 Telemetry is written off the request path by one writer thread, which commits
 whatever is queued in one transaction and keeps only the latest copy of each
-request record. When more than 1,024 writes are queued, streamed usage
+request record. When more than 8,192 writes are queued, streamed usage
 snapshots are dropped first; final request records are kept up to 65,536
 queued writes. `/health` counts both kinds of drop since start, and the
 console warns only about request drops or storage errors in the last 15
@@ -622,6 +622,7 @@ The private namespace is served only on the admin listener:
 | `/telemetry/requests/{id}` | One request and its single attempt ID |
 | `/telemetry/requests/{id}/events` | Paginated numeric usage snapshots |
 | `/telemetry/summary` | Token totals and usage-status counts for a bounded page |
+| `/telemetry/aggregate` | Full-filter request/token totals, model usage and request health; independent of table pagination |
 | `/telemetry/export` | JSON page; `format=jsonl` returns NDJSON |
 
 List/summary/export support `project_id`, `run_id`, `client_id`, `key_id`, `backend`, `model`,
@@ -632,6 +633,48 @@ when another page exists. Summary `synthetic` is `null` for mixed pages, with
 separate synthetic/provider request counts. JSONL pagination uses `x-next-cursor`. Reads use four
 bounded blocking workers, a 250 ms SQLite execution budget, and a 500 ms lock
 wait budget. Queries are fixed and parameterized. Arbitrary SQL is not accepted.
+
+The console overview uses `/telemetry/aggregate` with the same scope filters as
+its request table. Pagination and export options (`limit`, `cursor`, `order`,
+`format`) are rejected by that endpoint. Counts include counting requests;
+generation usage excludes them. Totals, health and the top five models come from
+one SQLite snapshot. Responses identify their full-filter scope, calculation time
+and a cache lifetime of at most one second. Loading older rows or refreshing the
+table does not reduce the overview to 100 requests. Export still exports loaded
+request rows; paginated APIs retain their existing contracts.
+
+On the first upgraded startup, existing requests are backfilled into a compact,
+indexed reporting table without replacing raw records or credentials. Every
+subsequent reporting update commits in the same transaction as its raw request
+snapshot, including maintained global and minute totals. Stream snapshots replace
+their earlier contribution. Time ranges use whole-minute totals and inspect only
+the boundary minutes' individual records, preserving inclusive timestamp filters.
+SQLite remains in WAL mode. Aggregate reads are limited to two workers
+within the existing four-reader pool, 250 ms query budget and 500 ms lock wait;
+the cache holds at most 64 filter selections. A one-time migration over a large
+history can extend startup time.
+
+### Local telemetry acceptance and stress tests
+
+```bash
+./scripts/test-telemetry.sh
+cargo build --locked --offline --release
+./scripts/test-telemetry.sh --stress --one-cpu --binary target/release/vertex-shim \
+  --concurrency 32,128,256 --waves 20 --history 100000 --readers 4 \
+  --payload-bytes 131072 --output target/telemetry-stress/results.json
+```
+
+These tests create a temporary relay, legacy history database and loopback-only
+synthetic streaming provider with generated fixture credentials. They do not
+load host provider settings or invoke Claude. They measure actual active streams,
+inference/aggregate latency, RSS and writer backlog, then reconcile response IDs
+and final usage against raw SQLite rows, paginated APIs, aggregates and restart.
+The stress matrix compares streaming without summary readers against four
+concurrent readers. One reader includes the full retained history. Optional
+one-CPU affinity limits the relay's CPU placement; memory is measured, not capped.
+The artificial stream pacing, payloads and loopback network do not establish
+upstream provider limits or production capacity. Results belong under ignored
+`target/`, not in telemetry or credential volumes.
 
 Send `x-shim-run-id` with an ASCII run label to attribute requests. Records include
 requested output budget, token usage, configured context capacity, normalized

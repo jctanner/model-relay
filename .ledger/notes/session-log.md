@@ -84,3 +84,14 @@ formatting, all 33 tests, clippy and whitespace checks passed. Deployed through
 Breadboard make host-rebuild-relay; all three served assets match source and
 both provider inventories are unchanged. No policy save or paid inference.
 See [task](../tasks/done/provider-model-editor-layout.md).
+
+## 2026-10-13: Model Relay full-filter telemetry
+
+Implemented and deployed via make host-rebuild-relay. Overview totals are
+independent of table pagination; raw snapshots and reporting rollups update
+atomically. Fixed measured summary timeouts and increased the bounded event
+buffer to preserve synchronized stream bursts. Final stress cases reached actual
+32/128/256 streams on one CPU with 100,000 history rows; minute-crossing checks
+also passed. 39,680 requests, 2,473 reporting reads, zero dropped requests/events
+or storage errors. All 4,859 deployed requests, control state and credential files
+were preserved. No paid calls. Evidence: notes/telemetry-aggregates-stress-results.md.

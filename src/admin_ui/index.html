@@ -55,14 +55,15 @@
           <label>To<input name="to" type="datetime-local"></label>
           <button class="primary" type="submit">Apply filters</button>
         </form>
+        <p id="aggregate-scope" class="hint">Overview totals cover all matching requests.</p>
         <div class="stats">
-          <article class="stat panel"><span>Loaded requests</span><strong id="stat-requests">—</strong><small id="stat-request-note">Current filtered selection</small></article>
+          <article class="stat panel"><span>Matching requests</span><strong id="stat-requests">—</strong><small id="stat-request-note">Current filtered selection</small></article>
           <article class="stat panel"><span>Input tokens</span><strong id="stat-input">—</strong><small>Uncached generation input</small></article>
           <article class="stat panel"><span>Output tokens</span><strong id="stat-output">—</strong><small>Generation output</small></article>
           <article class="stat panel"><span>Cache tokens</span><strong id="stat-cache">—</strong><small id="stat-cache-note">Read + creation</small></article>
         </div>
         <div class="telemetry-secondary">
-          <article class="panel"><div class="panel-heading"><h2>Usage by model</h2><span class="hint">Generation tokens · loaded requests</span></div><div id="model-bars" class="model-bars"></div></article>
+          <article class="panel"><div class="panel-heading"><h2>Usage by model</h2><span class="hint">Generation tokens · selected filters</span></div><div id="model-bars" class="model-bars"></div></article>
           <article class="panel"><div class="panel-heading"><h2>Request health</h2></div><dl id="request-health" class="health-list"></dl><p class="hint card-note">These are relay-observed token totals. Subscription quota snapshots are not collected yet.</p></article>
         </div>
         <article class="panel table-panel">

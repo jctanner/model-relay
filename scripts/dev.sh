@@ -239,7 +239,7 @@ case ${1:-help} in
         ;;
     restart)
         # Compile first. A failed build never signals/replaces the running binary.
-        podman exec "$proxy" bash -c 'export SHIM_BUILD_ID=$(sha256sum Cargo.toml Cargo.lock src/*.rs src/admin_ui/* | sha256sum | cut -d " " -f1); cargo build --locked --offline && install /build/target/debug/vertex-shim /build/bin/vertex-shim.next && mv /build/bin/vertex-shim.next /build/bin/vertex-shim && touch /run/vertex-shim/restart'
+        podman exec "$proxy" bash -c 'export SHIM_BUILD_ID=$(sha256sum Cargo.toml Cargo.lock src/*.rs src/telemetry/*.rs src/admin_ui/* | sha256sum | cut -d " " -f1); cargo build --locked --offline && install /build/target/debug/vertex-shim /build/bin/vertex-shim.next && mv /build/bin/vertex-shim.next /build/bin/vertex-shim && touch /run/vertex-shim/restart'
         sleep 1
         podman exec "$proxy" curl -fsS http://127.0.0.1:8080/health
         ;;

@@ -2,6 +2,12 @@
 
 ## Completed work
 
+- [Full-filter telemetry and stress tests](tasks/done/telemetry-aggregates-and-stress.md):
+  deployed 2026-10-13; totals independent of table pages. Actual 32/128/256-stream
+  stress and minute-crossing continuations preserve requests and events, with
+  concurrent reporting and 100,000 history rows; zero paid calls.
+  [Results](notes/telemetry-aggregates-stress-results.md).
+
 - [Provider model editor layout](tasks/done/provider-model-editor-layout.md):
   deployed 2026-10-12; compact checkboxes and four-column model rows in a wider modal.
 
