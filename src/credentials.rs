@@ -17,6 +17,7 @@ const SKEW_MS: i64 = 60_000;
 
 #[derive(Clone)]
 pub enum Credentials {
+    Vertex(Arc<crate::vertex::Vertex>),
     ManagedToken(PathBuf),
     BearerFile(PathBuf),
     ClaudeOAuth(Arc<OAuth>),
@@ -32,7 +33,7 @@ fn auth_error(code: &'static str) -> ApiError {
 fn valid_token(value: &str) -> bool {
     !value.is_empty() && value.len() <= 16 * 1024 && value.bytes().all(|b| b.is_ascii_graphic())
 }
-fn bounded_file(path: &Path, limit: u64) -> Result<String, ApiError> {
+pub(crate) fn bounded_file(path: &Path, limit: u64) -> Result<String, ApiError> {
     let mut text = String::new();
     File::open(path)
         .map_err(|_| auth_error("upstream_auth_missing"))?
@@ -47,6 +48,7 @@ fn bounded_file(path: &Path, limit: u64) -> Result<String, ApiError> {
 impl Credentials {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Vertex(_) => "google-service-account",
             Self::ManagedToken(_) => "api-token",
             Self::BearerFile(_) => "bearer-file",
             Self::ClaudeOAuth(_) => "claude-oauth",
@@ -54,6 +56,7 @@ impl Credentials {
     }
     pub async fn token(&self) -> Result<String, ApiError> {
         match self {
+            Self::Vertex(vertex) => Ok(vertex.authorize().await?.token),
             Self::ManagedToken(path) => {
                 let path = path.clone();
                 tokio::task::spawn_blocking(move || {
@@ -95,6 +98,7 @@ impl Credentials {
     }
     pub async fn status(&self) -> Value {
         match self {
+            Self::Vertex(vertex) => vertex.status().await,
             Self::BearerFile(_) | Self::ManagedToken(_) => {
                 json!({"mode":self.kind(),"state":if self.token().await.is_ok() {"ready"} else {"unavailable"}})
             }
@@ -183,7 +187,7 @@ struct Token {
     expires_ms: i64,
 }
 
-fn private_file(path: &Path, uid: u32) -> Result<(), ApiError> {
+pub(crate) fn private_file(path: &Path, uid: u32) -> Result<(), ApiError> {
     let info = std::fs::symlink_metadata(path).map_err(|_| auth_error("upstream_auth_missing"))?;
     if !info.is_file() || info.uid() != uid || info.mode() & 0o077 != 0 {
         return Err(auth_error("upstream_auth_permissions"));

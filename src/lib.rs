@@ -11,6 +11,7 @@ pub mod projects;
 pub mod routing;
 pub mod streaming;
 pub mod telemetry;
+pub mod vertex;
 
 use axum::{
     Json, Router,

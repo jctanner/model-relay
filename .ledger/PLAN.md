@@ -2,6 +2,12 @@
 
 ## Completed work
 
+- [Vertex upstream accounts](tasks/done/vertex-upstream-accounts.md): deployed
+  2026-10-15; secret JSON editor, Google token caching/refresh and Vertex
+  forwarding. 43 tests and browser checks pass. Live Google authentication
+  succeeds; built-in default routing now uses the new account, with GLM's
+  EnMaaS override preserved. No paid inference.
+
 - [Full-filter telemetry and stress tests](tasks/done/telemetry-aggregates-and-stress.md):
   deployed 2026-10-13; totals independent of table pages. Actual 32/128/256-stream
   stress and minute-crossing continuations preserve requests and events, with

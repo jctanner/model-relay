@@ -97,6 +97,28 @@ pub struct Inventory {
     pub refresh_error: Option<String>,
 }
 impl Inventory {
+    pub fn vertex() -> Self {
+        Self {
+            configured: true,
+            models: [
+                ("claude-opus-4-6", "Claude Opus 4.6"),
+                ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+                ("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
+            ]
+            .into_iter()
+            .map(|(id, name)| Entry {
+                id: id.into(),
+                enabled: true,
+                manual: true,
+                display_name: Some(name.into()),
+                discovered: None,
+                max_input_tokens: None,
+                max_tokens: None,
+            })
+            .collect(),
+            ..Self::default()
+        }
+    }
     pub fn enmaas() -> Self {
         Self {
             configured: true,
@@ -296,7 +318,15 @@ async fn update(
     Path(id): Path<String>,
     Json(mut input): Json<Inventory>,
 ) -> Result<Json<Inventory>, ApiError> {
-    select(&app, &id)?;
+    let selected = select(&app, &id)?;
+    if matches!(&selected.backend, Backend::Anthropic(u) if u.provider == "vertex") {
+        for model in &mut input.models {
+            model.id = crate::models::canonical(&app, &model.id);
+            if model.enabled {
+                crate::vertex::model_id(&model.id)?;
+            }
+        }
+    }
     let mut ids = std::collections::BTreeSet::new();
     if input.models.len() > 1000
         || input.models.iter().any(|m| {
@@ -350,6 +380,11 @@ async fn refresh(
     Path(id): Path<String>,
 ) -> Result<Json<Inventory>, ApiError> {
     let selected = select(&app, &id)?;
+    if matches!(&selected.backend, Backend::Anthropic(u) if u.provider == "vertex") {
+        return Err(ApiError::bad(
+            "Vertex uses manual model inventory; edit Models to add or enable Claude IDs",
+        ));
+    }
     if let Backend::Anthropic(u) = &selected.backend {
         u.clear_catalog().await;
     }

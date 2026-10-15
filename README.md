@@ -574,6 +574,12 @@ profiles. Real provider credentials remain in the proxy. See
 
 ## Telemetry REST
 
+Managed upstream accounts support Anthropic OAuth, EnMaaS personal API tokens,
+and Google Vertex service-account JSON. Vertex accounts have independent
+project/region settings and a secret credential editor; route entire projects
+or individual models to them. Client authentication stays local to the relay.
+See [upstream account configuration and APIs](docs/upstream-accounts.md).
+
 The admin listener also serves a browser console at `/admin/`. Get the URL for
 your running session with:
 

@@ -1,9 +1,48 @@
-# Managed Anthropic OAuth accounts
+# Managed upstream accounts
 
 The admin console's **Upstream accounts** view manages relay-owned subscription
 accounts alongside existing server-configured profiles. Each managed account
 becomes a project-selectable upstream profile. It does not change local client
 authentication or the current default host login.
+
+## Vertex service accounts
+
+Choose **Google Vertex · service account** when adding an account. Open
+**Vertex credentials**, enter the upstream Google Cloud project and region
+(`global` is supported), and paste the exported service-account JSON. The
+secret field starts masked, is cleared after submission or closing the dialog,
+and is never populated from the server. Leave it blank when editing project or
+region to keep the saved key. Paste a replacement to rotate the key.
+
+Assign the new account as a project's default upstream, or as the destination
+for selected models. Both Messages and Vertex clients can use it. Clients keep
+their existing relay credentials and local Vertex project ID; the relay uses
+the upstream account's real project and location for Google requests.
+
+The relay signs an RS256 service-account assertion with the cloud-platform
+scope and exchanges it at Google's fixed `https://oauth2.googleapis.com/token`
+endpoint. Uploaded JSON cannot redirect credential exchange to another host.
+Access tokens stay in memory, refresh within one minute of expiration, and
+share one refresh across concurrent requests. Failures back off for ten seconds;
+**Refresh access** retries immediately. Rotation and disconnect invalidate the
+cache under the same lock used for refresh. Status responses show configuration,
+expiry and safe error codes, without the JSON, account email or Google token.
+
+The JSON is stored by atomic mode-0600 replacement in
+`/data/oauth-accounts/{id}/vertex-credentials.json`, inside a mode-0700 directory.
+It is not encrypted at rest: protect the volume and its backups as credentials.
+SQLite stores account metadata and model policy, without the credential JSON.
+
+Vertex has no Anthropic `/v1/models` endpoint. Its **Models** editor starts with
+manual entries for Opus 4.6, Sonnet 4.6 and Haiku 4.5. Add or disable Claude
+models there as needed; the entries do not prove Google project access, model
+enablement or quota. Dated IDs are translated to Vertex's `@YYYYMMDD` format.
+GLM is not a Vertex Claude model and must route to a suitable other provider.
+Google authentication and Vertex inference are separate checks; saving a valid
+key alone does not verify IAM permissions or model availability.
+
+Protocol references: [Google service-account OAuth](https://developers.google.com/identity/protocols/oauth2/service-account)
+and [Anthropic's Vertex SDK transport](https://github.com/anthropics/anthropic-sdk-typescript/blob/main/packages/vertex-sdk/src/client.ts).
 
 ## Browser authorization
 
@@ -43,6 +82,8 @@ base path is `/api/private/v1/upstream-accounts`; responses are `no-store`.
 | --- | --- | --- |
 | GET | empty | List safe account status, including external profiles and helper availability |
 | POST | empty | Create with `{ "account_id": "team-a", "display_name": "Team A" }` |
+| PUT | `/{account}/vertex` | Vertex only: `{ "project_id": "gcp-project", "region": "global", "service_account_json": "<secret JSON text>" }`; omit the secret to retain it |
+| PUT | `/{account}/token` | EnMaaS only: set or rotate `{ "token": "<personal API token>" }` |
 | GET | `/{account}` | Managed account status and safe login summary |
 | PUT | `/{account}` | Rename using `{ "display_name": "New name" }` |
 | DELETE | `/{account}` | Remove account/credentials; 409 if any live project references it |
@@ -64,7 +105,11 @@ IDs are immutable, unique across managed and static profiles, and cannot use
 IDs immediately; no restart is required to create, connect, or assign accounts.
 Missing credentials fail closed, without switching a project to another account.
 
-## Refresh and durable state
+Creation accepts `provider`: `anthropic` (the default), `enmaas`, or `vertex`.
+Browser login applies to Anthropic accounts; Vertex and EnMaaS use their own
+credential editors and never launch the Claude login helper.
+
+## Anthropic refresh and durable state
 
 The relay owns refresh only for managed accounts. A per-account mutex serializes
 refresh, native-login publication, and credential deletion. Requests renew when

@@ -60,7 +60,7 @@ async function collection(path) {
 
 function disconnect() {
   clearLogin(true);
-  previewGeneration++; projectPreviewGeneration++; routingInventories.clear(); modelEditor = null; accountTokenTarget = null;
+  previewGeneration++; projectPreviewGeneration++; routingInventories.clear(); modelEditor = null; accountTokenTarget = null; vertexAccountTarget = null;
   state.key = ''; state.session++; state.telemetryLoad++; state.tokenLoad++; state.scopeLoad++;
   state.projects = []; state.profiles = []; state.accounts = []; state.editingAccount = null; state.tokens = []; state.telemetryKeys = []; state.requests = []; state.events = [];
   state.cursor = null; state.confirmation = null; state.editingProject = null; state.editingToken = null;
@@ -71,6 +71,7 @@ function disconnect() {
   for (const id of ['request-rows', 'project-rows', 'token-rows', 'profile-cards', 'account-rows', 'model-bars', 'request-health']) $(id).replaceChildren();
   for (const id of ['request-detail', 'request-events', 'secret-details', 'secret-status']) text(id, '');
   $('issued-secret').value = ''; state.secretID = ''; $('admin-key').value = '';
+  clearVertexSecret();
   $('filters').reset();
   selectOptions('telemetry-scope', [], 'All projects and keys');
   $('telemetry-scope').title = '';
@@ -274,18 +275,22 @@ function renderAccounts() {
     const assigned = state.projects.filter(project => routingProfiles(projectRouting(project)).includes(account.profile_id));
     const active = account.login && ['starting', 'awaiting_code', 'exchanging'].includes(account.login.state);
     if (account.managed) {
-      if (account.provider === 'enmaas') { actions.append(button(auth.state === 'ready' ? 'Rotate token' : 'Set token', () => tokenAccountEditor(account)), button('Rename', () => accountEditor(account))); } else {
+      if (account.provider === 'vertex') {
+        actions.append(button('Vertex credentials', () => vertexAccountEditor(account)), button('Rename', () => accountEditor(account)));
+        if (auth.configured) actions.append(button('Refresh access', async () => { await api(accountPath(account.account_id) + '/refresh', 'POST'); await workspace(); notice('Google access refreshed.'); }));
+      } else if (account.provider === 'enmaas') { actions.append(button(auth.state === 'ready' ? 'Rotate token' : 'Set token', () => tokenAccountEditor(account)), button('Rename', () => accountEditor(account))); } else {
       const connect = button(active ? 'Continue login' : auth.state === 'ready' ? 'Reconnect' : 'Connect', () => connectAccount(account));
       connect.disabled = !state.loginAvailable; actions.append(connect, button('Rename', () => accountEditor(account)));
       if (auth.state === 'ready') actions.append(button('Refresh access', async () => { await api(accountPath(account.account_id) + '/refresh', 'POST'); await workspace(); notice('Account access refreshed.'); }));
       }
-      if (auth.state === 'ready' || auth.expires_at || active) actions.append(button('Disconnect', () => confirmAction('Disconnect upstream account?', `Projects using ${account.account_id} will lose upstream access until you reconnect. Its credentials will be removed from the relay.`, 'Disconnect account', async () => { await api(accountPath(account.account_id) + '/disconnect', 'POST'); await workspace(); notice('Account disconnected.'); }), 'danger-text'));
+      if (auth.state === 'ready' || auth.configured || auth.expires_at || active) actions.append(button('Disconnect', () => confirmAction('Disconnect upstream account?', `Projects using ${account.account_id} will lose upstream access until you reconnect. Its credentials will be removed from the relay.`, 'Disconnect account', async () => { await api(accountPath(account.account_id) + '/disconnect', 'POST'); await workspace(); notice('Account disconnected.'); }), 'danger-text'));
       const remove = button('Delete', () => confirmAction('Delete upstream account?', `Delete ${account.account_id} and its stored credentials? Reassign any projects first.`, 'Delete account', async () => { await api(accountPath(account.account_id), 'DELETE'); await workspace(); notice('Upstream account deleted.'); }), 'danger-text');
       remove.disabled = assigned.length > 0; remove.title = assigned.length ? 'Reassign this account’s projects before deleting' : ''; actions.append(remove);
     } else actions.append(element('span', 'Server configured', 'hint'));
     const label = active ? 'Login in progress' : auth.state === 'ready' ? 'Connected' : 'Needs connection';
     actions.append(button('Models', () => modelsEditor(account.profile_id)));
-    row.append(cell(lines(account.display_name, account.account_id)), cell(badge(account.managed ? 'Relay managed' : 'Server configured')), cell(lines('', auth.last_error ? 'Reconnect required or refresh unavailable' : ''), badge(label, active ? 'warn' : auth.state === 'ready' ? 'good' : 'warn')), cell(time(auth.expires_at)), cell(lines(number(assigned.length), assigned.map(project => project.project_id).join(', '))), cell(actions));
+    const source = account.provider === 'vertex' ? `Vertex · ${auth.project_id || 'not configured'}${auth.region ? ' · ' + auth.region : ''}` : account.managed ? 'Relay managed' : 'Server configured';
+    row.append(cell(lines(account.display_name, account.account_id)), cell(badge(source)), cell(lines('', auth.last_error || auth.error ? 'Reconnect required or refresh unavailable' : ''), badge(label, active ? 'warn' : auth.state === 'ready' ? 'good' : 'warn')), cell(time(auth.expires_at)), cell(lines(number(assigned.length), assigned.map(project => project.project_id).join(', '))), cell(actions));
     $('account-rows').append(row);
   }
 }
@@ -303,6 +308,7 @@ async function saveAccount() {
   await api(state.editingAccount ? accountPath(id) : '/upstream-accounts', state.editingAccount ? 'PUT' : 'POST', state.editingAccount ? { display_name } : { account_id: id, display_name, provider: $('account-provider').value });
   const added = !state.editingAccount; $('account-dialog').close(); await workspace();
   if (added && $('account-provider').value === 'enmaas') tokenAccountEditor(state.accounts.find(account => account.account_id === id));
+  else if (added && $('account-provider').value === 'vertex') vertexAccountEditor(state.accounts.find(account => account.account_id === id));
   else if (added && state.loginAvailable) await connectAccount(state.accounts.find(account => account.account_id === id));
   else notice('Upstream account saved.');
 }
@@ -420,7 +426,7 @@ function projectProfiles(project) {
   return routingProfiles(projectRouting(project)).map(id => state.profiles.find(p => p.profile_id === id)).filter(Boolean);
 }
 function providerName(project) {
-  return projectProfiles(project).map(profile => profile.provider === 'enmaas' ? 'EnMaaS' : profile.backend === 'mock' ? 'Development simulator' : 'Anthropic').filter((name, i, all) => all.indexOf(name) === i).join(' + ') || 'No available upstream';
+  return projectProfiles(project).map(profile => profile.provider === 'enmaas' ? 'EnMaaS' : profile.provider === 'vertex' ? 'Vertex' : profile.backend === 'mock' ? 'Development simulator' : 'Anthropic').filter((name, i, all) => all.indexOf(name) === i).join(' + ') || 'No available upstream';
 }
 
 function tokenAuthFlow(vertex) {
@@ -535,6 +541,36 @@ $('telemetry-scope').addEventListener('change', event => { event.currentTarget.t
 $('load-more').addEventListener('click', event => task(event.currentTarget, () => loadTelemetry(true)));
 $('export-telemetry').addEventListener('click', () => download(JSON.stringify({ filters: Object.fromEntries(new URLSearchParams(state.query)), items: state.requests, next_cursor: state.cursor }, null, 2), 'model-relay-telemetry.json', 'application/json'));
 
+let vertexAccountTarget = null;
+function clearVertexSecret() {
+  $('vertex-json').value = ''; $('vertex-json-secret').value = ''; $('vertex-show-json').checked = false;
+  $('vertex-json').hidden = true; $('vertex-json').required = false; $('vertex-json-secret').hidden = false;
+}
+function vertexAccountEditor(account) {
+  vertexAccountTarget = account.account_id; $('vertex-form').reset(); clearVertexSecret(); text('vertex-error', '');
+  text('vertex-account', account.display_name);
+  $('vertex-project').value = account.upstream_auth?.project_id || '';
+  $('vertex-region').value = account.upstream_auth?.region || 'global';
+  $('vertex-json-secret').required = !account.upstream_auth?.configured;
+  $('vertex-json-secret').placeholder = account.upstream_auth?.configured ? 'Key saved. Paste a replacement to rotate it.' : 'Paste the Google service-account JSON here.';
+  $('vertex-dialog').showModal();
+}
+$('vertex-show-json').addEventListener('change', event => {
+  const source = event.target.checked ? $('vertex-json-secret') : $('vertex-json');
+  const target = event.target.checked ? $('vertex-json') : $('vertex-json-secret');
+  target.value = source.value; target.required = source.required; source.required = false; source.value = '';
+  source.hidden = true; target.hidden = false; target.focus();
+});
+$('vertex-dialog').addEventListener('close', () => { clearVertexSecret(); vertexAccountTarget = null; });
+$('vertex-form').addEventListener('submit', event => { event.preventDefault(); task(event.submitter, async () => {
+  const secret = $('vertex-show-json').checked ? $('vertex-json') : $('vertex-json-secret');
+  const input = { project_id: $('vertex-project').value.trim(), region: $('vertex-region').value.trim(), service_account_json: secret.value || null };
+  const target = vertexAccountTarget; clearVertexSecret();
+  try { await api(accountPath(target) + '/vertex', 'PUT', input); }
+  finally { input.service_account_json = null; }
+  $('vertex-dialog').close(); await workspace(); notice('Vertex credentials saved.');
+}, 'vertex-error'); });
+
 let accountTokenTarget = null;
 function tokenAccountEditor(account) {
   accountTokenTarget = account.account_id; $('api-token-value').value = ''; text('api-token-error', '');
@@ -577,7 +613,11 @@ function renderInventory() {
   }
 }
 async function modelsEditor(profile) {
-  modelEditor = { profile, inventory: await api(inventoryPath(profile)) }; text('models-error', ''); renderInventory(); $('models-dialog').showModal();
+  modelEditor = { profile, inventory: await api(inventoryPath(profile)) }; text('models-error', ''); renderInventory();
+  const vertex = state.profiles.find(p => p.profile_id === profile)?.provider === 'vertex';
+  $('models-refresh').hidden = vertex;
+  if (vertex) text('models-status', 'Vertex uses manual model inventory. Register Claude model IDs and enable the models available to this Google project.');
+  $('models-dialog').showModal();
 }
 $('models-dialog').addEventListener('close', () => { modelEditor = null; $('manual-model-id').value = ''; });
 $('models-reload').addEventListener('click', event => task(event.target, async () => { modelEditor.inventory = await api(inventoryPath(modelEditor.profile)); renderInventory(); }, 'models-error'));

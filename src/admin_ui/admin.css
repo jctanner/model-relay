@@ -14,6 +14,10 @@ dialog{border:1px solid var(--border);border-radius:14px;padding:27px;width:480p
 .button-link{display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);border-radius:7px;padding:9px 15px;text-decoration:none;font-weight:600;color:var(--ink)}.button-link:hover{background:#edf1eb}.login-steps{padding-left:20px;color:var(--muted);font-size:13px}.login-steps li{margin-bottom:10px}#login-url{font-family:ui-monospace,SFMono-Regular,monospace;font-size:11px;overflow-wrap:anywhere}#login-form{margin-top:24px}.account-actions{flex-wrap:wrap;max-width:310px}@media(max-width:620px){.sidebar nav{flex-wrap:wrap}.nav-item{width:auto;flex:1 1 40%;font-size:12px}}
 
 #models-dialog { width:1200px; }
+#vertex-dialog { width:760px; }
+#vertex-json { font-family:ui-monospace,SFMono-Regular,monospace; font-size:12px; resize:vertical; }
+.secret-reveal { display:flex; align-items:center; gap:8px; }
+.secret-reveal input { width:16px; height:16px; min-height:0; margin:0; padding:0; flex:none; }
 #models-dialog .table-scroll { max-height:50vh; margin-top:12px; }
 #models-dialog table { table-layout:fixed; min-width:900px; }
 #models-dialog th { position:sticky; top:0; z-index:1; }

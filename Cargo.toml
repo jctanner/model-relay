@@ -9,6 +9,7 @@ axum = "=0.8.9"
 chrono = { version = "=0.4.44", default-features = false, features = ["clock", "serde"] }
 futures-util = "=0.3.32"
 getrandom = "=0.4.3"
+jsonwebtoken = { version = "=10.3.0", features = ["rust_crypto"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "stream", "gzip"] }
 rusqlite = { version = "=0.37.0", features = ["bundled", "hooks"] }
 serde = { version = "=1.0.228", features = ["derive"] }
@@ -19,6 +20,8 @@ tokio = { version = "=1.52.1", features = ["macros", "rt-multi-thread", "net", "
 uuid = { version = "=1.23.1", features = ["v4"] }
 
 [dev-dependencies]
+rand = "=0.8.6"
+rsa = "=0.9.10"
 http-body-util = "=0.1.3"
 tempfile = "=3.27.0"
 tower = { version = "=0.5.3", features = ["util"] }

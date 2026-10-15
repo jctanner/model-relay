@@ -98,9 +98,9 @@
     <form id="account-form">
       <div class="dialog-heading"><div><p class="eyebrow">UPSTREAM ACCOUNT</p><h2 id="account-dialog-title">Add upstream account</h2></div><button class="icon-button" type="button" data-close="account-dialog" aria-label="Close account editor">×</button></div>
       <label>Account ID<input id="account-id" required maxlength="63" pattern="[a-z][a-z0-9\-]*[a-z0-9]|[a-z]" placeholder="team-alpha"></label>
-      <label>Provider<select id="account-provider"><option value="anthropic">Anthropic OAuth</option><option value="enmaas">EnMaaS · personal API token</option></select></label>
+      <label>Provider<select id="account-provider"><option value="anthropic">Anthropic OAuth</option><option value="enmaas">EnMaaS · personal API token</option><option value="vertex">Google Vertex · service account</option></select></label>
       <label>Display name<input id="account-name" required maxlength="200" placeholder="Alpha team subscription"></label>
-      <p class="hint">After saving, connect OAuth in your browser or enter an EnMaaS token. Its ID becomes an upstream profile for projects.</p>
+      <p class="hint">After saving, connect OAuth, enter an EnMaaS token or configure Vertex credentials. Its ID becomes an upstream profile for projects.</p>
       <p id="account-form-error" class="form-error" role="alert"></p>
       <div class="dialog-footer"><button class="secondary" type="button" data-close="account-dialog">Cancel</button><button class="primary" type="submit">Save account</button></div>
     </form>
@@ -111,6 +111,23 @@
     <p id="api-token-account" class="muted"></p><label>Personal API token<input id="api-token-value" type="password" required autocomplete="off" spellcheck="false" maxlength="16384"></label>
     <p class="hint">Stored privately on the relay. Clients receive separate relay credentials.</p><p id="api-token-error" class="form-error"></p>
     <div class="dialog-footer"><button class="primary" type="submit">Save token</button></div></form>
+  </dialog>
+  <dialog id="vertex-dialog" class="wide-dialog">
+    <form id="vertex-form" autocomplete="off">
+      <div class="dialog-heading"><h2>Vertex credentials</h2><button class="icon-button" type="button" data-close="vertex-dialog" aria-label="Close Vertex editor">×</button></div>
+      <p id="vertex-account" class="muted"></p>
+      <div class="form-grid">
+        <label>Google Cloud project ID<input id="vertex-project" required maxlength="63" placeholder="your-gcp-project" autocomplete="off" spellcheck="false"></label>
+        <label>Region<input id="vertex-region" required maxlength="63" placeholder="global" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <label for="vertex-json-secret">Service-account JSON (secret)</label>
+      <input id="vertex-json-secret" type="password" maxlength="49152" autocomplete="off" spellcheck="false" aria-describedby="vertex-secret-note">
+      <textarea id="vertex-json" hidden rows="7" maxlength="49152" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Service-account JSON (visible)" aria-describedby="vertex-secret-note"></textarea>
+      <label class="secret-reveal"><input id="vertex-show-json" type="checkbox">Show pasted JSON</label>
+      <p id="vertex-secret-note" class="hint">Stored privately on the relay and never returned. Leave blank to keep a saved key. Clients continue using their relay credentials.</p>
+      <p id="vertex-error" class="form-error" role="alert"></p>
+      <div class="dialog-footer"><button class="secondary" type="button" data-close="vertex-dialog">Cancel</button><button class="primary" type="submit">Save credentials</button></div>
+    </form>
   </dialog>
   <dialog id="models-dialog" class="wide-dialog">
     <div class="dialog-heading"><h2 id="models-title">Upstream models</h2><button class="icon-button" type="button" data-close="models-dialog">×</button></div>

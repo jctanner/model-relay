@@ -218,6 +218,18 @@ impl Manager {
             upstream.credentials =
                 crate::credentials::Credentials::ManagedToken(directory.join("api-token.json"));
             Backend::Anthropic(upstream)
+        } else if info.provider == "vertex" {
+            Backend::Anthropic(
+                Upstream::new(
+                    "https://aiplatform.googleapis.com",
+                    PathBuf::new(),
+                    false,
+                    None,
+                    crate::backend::upstream_timeout().map_err(|_| ApiError::internal())?,
+                )
+                .map_err(|_| ApiError::internal())?
+                .with_vertex(Arc::new(crate::vertex::Vertex::new(directory.clone())?)),
+            )
         } else {
             Backend::Anthropic(
                 Upstream::new(
@@ -405,6 +417,11 @@ impl Manager {
             let _ = flow.control.try_send(Control::Cancel);
         }
         remove_api_token(&account)?;
+        if let Backend::Anthropic(u) = &account.backend
+            && let crate::credentials::Credentials::Vertex(vertex) = &u.credentials
+        {
+            vertex.disconnect().await?;
+        }
         account.oauth.disconnect().await
     }
     pub async fn background(self: Arc<Self>, mut stop: tokio::sync::watch::Receiver<bool>) {
@@ -548,6 +565,10 @@ pub fn routes() -> Router<App> {
             "/api/private/v1/upstream-accounts/{account}/token",
             axum::routing::put(set_token),
         )
+        .route(
+            "/api/private/v1/upstream-accounts/{account}/vertex",
+            axum::routing::put(set_vertex),
+        )
         .route("/api/private/v1/upstream-accounts", get(list).post(create))
         .route(
             "/api/private/v1/upstream-accounts/{account}",
@@ -603,7 +624,7 @@ async fn create(
     State(app): State<App>,
     Json(info): Json<AccountInfo>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    if !["anthropic", "enmaas"].contains(&info.provider.as_str())
+    if !["anthropic", "enmaas", "vertex"].contains(&info.provider.as_str())
         || !crate::projects::valid_id(&info.account_id)
         || info.account_id == "default"
         || info.display_name.is_empty()
@@ -629,6 +650,12 @@ async fn create(
                     c,
                     &info.account_id,
                     &crate::model_policy::Inventory::enmaas(),
+                )?;
+            } else if info.provider == "vertex" {
+                crate::model_policy::save(
+                    c,
+                    &info.account_id,
+                    &crate::model_policy::Inventory::vertex(),
                 )?;
             }
             sql(c.execute(
@@ -722,6 +749,11 @@ async fn remove(State(app): State<App>, Path(id): Path<String>) -> Result<Status
         .write()
         .map_err(|_| ApiError::internal())?
         .remove(&id);
+    if let Backend::Anthropic(u) = &account.backend
+        && let crate::credentials::Credentials::Vertex(vertex) = &u.credentials
+    {
+        vertex.disconnect().await?;
+    }
     // Keep the directory until any cancelled subprocess has exited; its credential is removed.
     Ok(StatusCode::NO_CONTENT)
 }
@@ -807,6 +839,12 @@ async fn disconnect(
 }
 async fn refresh(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     let account = manager(&app)?.account(&id)?;
+    if let Backend::Anthropic(u) = &account.backend
+        && let crate::credentials::Credentials::Vertex(vertex) = &u.credentials
+    {
+        vertex.renew().await?;
+        return Ok(Json(Manager::status(&account).await?));
+    }
     if matches!(&account.backend, Backend::Anthropic(u) if u.provider == "enmaas") {
         return Err(ApiError::bad("Rotate API tokens using the token endpoint"));
     }
@@ -815,16 +853,38 @@ async fn refresh(State(app): State<App>, Path(id): Path<String>) -> Result<Json<
 }
 
 fn remove_api_token(account: &Account) -> Result<(), ApiError> {
-    match std::fs::remove_file(account.directory.join("api-token.json")) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(ApiError::internal()),
+    for file in ["api-token.json", "vertex-credentials.json"] {
+        match std::fs::remove_file(account.directory.join(file)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(ApiError::internal()),
+        }
     }
+    File::open(&account.directory)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|_| ApiError::internal())
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TokenInput {
     token: String,
+}
+async fn set_vertex(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::vertex::Input>,
+) -> Result<Json<Value>, ApiError> {
+    let manager = manager(&app)?;
+    let _guard = manager.operations.lock().await;
+    let account = manager.account(&id)?;
+    let Backend::Anthropic(upstream) = &account.backend else {
+        return Err(ApiError::bad("This account is not a Vertex account"));
+    };
+    let crate::credentials::Credentials::Vertex(vertex) = &upstream.credentials else {
+        return Err(ApiError::bad("This account is not a Vertex account"));
+    };
+    vertex.configure(input).await?;
+    Ok(Json(Manager::status(&account).await?))
 }
 async fn set_token(
     State(app): State<App>,
@@ -866,6 +926,130 @@ mod tests {
     use http_body_util::BodyExt;
     use std::os::unix::fs::PermissionsExt;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn vertex_account_api_keeps_json_private_and_preserves_it_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = setup(dir.path(), Duration::from_secs(10)).await;
+        let router = crate::admin(app.clone());
+        let path = "/api/private/v1/upstream-accounts/vertex-test";
+        let created = call(&router, "POST", "/api/private/v1/upstream-accounts", "admin",
+            Some(json!({"account_id":"vertex-test","display_name":"Vertex fixture","provider":"vertex"}))).await;
+        assert_eq!(created.0, StatusCode::CREATED);
+        assert_eq!(created.1["upstream_auth"]["configured"], false);
+        let input = json!({"project_id":"central-test-project","region":"global",
+            "service_account_json":crate::vertex::tests::service_account().to_string()});
+        assert_eq!(
+            call(
+                &router,
+                "PUT",
+                &format!("{path}/vertex"),
+                "wrong-key",
+                Some(input.clone())
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let saved = call(
+            &router,
+            "PUT",
+            &format!("{path}/vertex"),
+            "admin",
+            Some(input),
+        )
+        .await;
+        assert_eq!(saved.0, StatusCode::OK);
+        assert_eq!(
+            saved.1["upstream_auth"]["project_id"],
+            "central-test-project"
+        );
+        assert_eq!(saved.1["upstream_auth"]["state"], "ready");
+        for endpoint in [path, "/api/private/v1/upstream-accounts"] {
+            let response = call(&router, "GET", endpoint, "admin", None).await;
+            let text = response.1.to_string();
+            assert!(!text.contains("PRIVATE KEY"));
+            assert!(!text.contains("client_email"));
+            assert!(!text.contains("service_account_json"));
+        }
+        assert_eq!(
+            call(&router, "POST", &format!("{path}/login"), "admin", None)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(
+                &router,
+                "PUT",
+                &format!("{path}/token"),
+                "admin",
+                Some(json!({"token":"wrong-provider"}))
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        let inventory = call(
+            &router,
+            "GET",
+            "/api/private/v1/upstream-profiles/vertex-test/models",
+            "admin",
+            None,
+        )
+        .await
+        .1;
+        assert_eq!(inventory["models"].as_array().unwrap().len(), 3);
+        let document = app
+            .store
+            .control(false, |c| {
+                sql(c.query_row(
+                    "SELECT payload FROM upstream_accounts WHERE account_id='vertex-test'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                ))
+            })
+            .await
+            .unwrap();
+        assert!(!document.contains("PRIVATE KEY"));
+        assert!(!document.contains("service_account"));
+        let credential_file = dir
+            .path()
+            .join("accounts/vertex-test/vertex-credentials.json");
+        assert_eq!(
+            std::fs::metadata(&credential_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(router);
+        drop(app);
+        let reopened = setup(dir.path(), Duration::from_secs(10)).await;
+        let router = crate::admin(reopened);
+        let status = call(&router, "GET", path, "admin", None).await.1;
+        assert_eq!(status["upstream_auth"]["state"], "ready");
+        assert_eq!(
+            status["upstream_auth"]["project_id"],
+            "central-test-project"
+        );
+        let edit = call(
+            &router,
+            "PUT",
+            &format!("{path}/vertex"),
+            "admin",
+            Some(json!({"project_id":"other-test-project","region":"us-east5"})),
+        )
+        .await;
+        assert_eq!(edit.0, StatusCode::OK);
+        assert_eq!(edit.1["upstream_auth"]["region"], "us-east5");
+        assert_eq!(
+            call(&router, "DELETE", path, "admin", None).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert!(!credential_file.exists());
+    }
 
     #[tokio::test]
     async fn enmaas_tokens_are_private_rotatable_persistent_and_glm_only() {

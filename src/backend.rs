@@ -350,10 +350,20 @@ impl Upstream {
         self.provider = "enmaas";
         self
     }
+    pub(crate) fn with_vertex(mut self, vertex: std::sync::Arc<crate::vertex::Vertex>) -> Self {
+        self.provider = "vertex";
+        self.credentials = Credentials::Vertex(vertex);
+        self
+    }
     pub async fn clear_catalog(&self) {
         *self.catalog_cache.lock().await = None;
     }
     pub async fn catalog(&self) -> Result<Vec<CatalogModel>, ApiError> {
+        if self.provider == "vertex" {
+            // Vertex has no Anthropic Models endpoint. Administrators maintain
+            // its inventory; these seeds are model IDs, not access verification.
+            return Ok(crate::model_policy::Inventory::vertex().catalog());
+        }
         // Validate credentials on every read, including cached metadata. Rotation
         // invalidates the cache; failures never serve stale catalog entries.
         let token = self.credentials.token().await?;
@@ -479,7 +489,14 @@ impl Upstream {
         streaming: bool,
         beta: Option<&str>,
     ) -> Result<reqwest::Response, ApiError> {
-        let token = self.credentials.token().await?;
+        let (token, vertex) = match &self.credentials {
+            Credentials::Vertex(credentials) => {
+                crate::vertex::model_id(model)?;
+                let auth = credentials.authorize().await?;
+                (auth.token.clone(), Some(auth))
+            }
+            credentials => (credentials.token().await?, None),
+        };
         let payload = body
             .as_object_mut()
             .ok_or_else(|| ApiError::bad("Expected object"))?;
@@ -503,9 +520,33 @@ impl Upstream {
         } else {
             "/v1/messages"
         };
-        let url = self.origin.join(path).map_err(|_| ApiError::internal())?;
+        let url = if let Some(auth) = vertex {
+            let model = crate::vertex::model_id(model)?;
+            payload.insert("anthropic_version".into(), json!("vertex-2023-10-16"));
+            let (model, operation) = if counting {
+                payload.insert("model".into(), json!(model));
+                ("count-tokens".to_owned(), "rawPredict")
+            } else {
+                payload.remove("model");
+                (
+                    model,
+                    if streaming {
+                        "streamRawPredict"
+                    } else {
+                        "rawPredict"
+                    },
+                )
+            };
+            Url::parse(&format!(
+                "{}/v1/projects/{}/locations/{}/publishers/anthropic/models/{model}:{operation}",
+                auth.origin, auth.project_id, auth.region
+            ))
+            .map_err(|_| ApiError::internal())?
+        } else {
+            self.origin.join(path).map_err(|_| ApiError::internal())?
+        };
         // Construct outbound headers from scratch. Client/admin credentials,
-        // arbitrary custom headers, and Google auth never enter this request.
+        // arbitrary custom headers and client Google auth never enter this request.
         let request = self.authenticated(self.client.post(url).json(&body), &token, beta);
         request.send().await.map_err(|error| {
             if error.is_timeout() {
