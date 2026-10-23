@@ -172,13 +172,13 @@
   <dialog id="token-dialog" class="wide-dialog">
     <form id="token-form">
       <div class="dialog-heading"><div><p class="eyebrow">CREDENTIAL</p><h2 id="token-dialog-title">Issue token</h2></div><button class="icon-button" type="button" data-close="token-dialog" aria-label="Close token editor">×</button></div>
-      <p id="token-target" class="muted"></p>
+      <label>Project<select id="token-form-project"></select><span class="hint">Choose the project whose upstream accounts and model routes this token will use.</span></label>
       <div id="token-issue-fields">
         <label>Token type<select id="token-type"><option value="maas">MaaS API key · expiring</option><option value="anthropic">Anthropic API key</option><option value="vertex">Vertex workload key</option></select></label>
         <div id="maas-fields"><label>Name<input id="token-name" maxlength="200" placeholder="Nightly batch"></label><div class="form-grid"><label>Expires in<input id="token-expiry" placeholder="90d" maxlength="32"></label><label class="checkbox align-end"><input id="token-ephemeral" type="checkbox"> Ephemeral · max 1 hour</label></div></div>
       </div>
       <label>Client ID<input id="token-client" required maxlength="128" pattern="[A-Za-z0-9._\-]+" placeholder="alpha-agent"></label>
-      <label>Backend<input id="token-backend" readonly value="Anthropic OAuth"><span class="hint">Inherited from the project’s model routes. Provider credentials stay on the relay.</span></label>
+      <label>Upstream providers<input id="token-backend" readonly><span class="hint">Inherited from the selected project’s model routes. Token type controls client authentication; it does not select an upstream provider.</span></label>
       <p id="token-auth-flow" class="hint"></p>
       <fieldset><legend>Model access</legend><label>Allowed models<select id="token-models" multiple size="5"></select></label><label class="checkbox"><input id="token-catalog" type="checkbox"> Allow all enabled models within project policy</label><label>Blocked models<select id="token-model-blocked" multiple size="5"></select></label><p id="token-model-note" class="hint"></p><pre id="token-model-effective" class="hint"></pre></fieldset>
       <p id="token-form-note" class="hint"></p><p id="token-form-error" class="form-error" role="alert"></p>

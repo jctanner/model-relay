@@ -445,7 +445,10 @@ async function tokenEditor(token = null) {
   state.editingToken = token; state.tokenFormProject = $('token-project').value;
   $('token-form').reset(); text('token-form-error', '');
   text('token-dialog-title', token ? 'Edit token grants' : 'Issue token');
-  text('token-target', `Project: ${state.tokenFormProject}`); $('token-issue-fields').hidden = !!token;
+  selectOptions('token-form-project', state.projects.map(project => ({ value: project.project_id, label: `${project.display_name} (${project.project_id}) · ${providerName(project)}${project.enabled ? '' : ' · disabled'}` })));
+  $('token-form-project').value = state.tokenFormProject;
+  $('token-form-project').disabled = !!token;
+  $('token-issue-fields').hidden = !!token;
   $('token-client').value = token?.client_id || '';
 
   const project = state.projects.find(item => item.project_id === state.tokenFormProject);
@@ -458,6 +461,7 @@ async function tokenEditor(token = null) {
   } else { $('token-catalog').checked = true; tokenTypeChanged(); }
   text('token-form-note', token ? 'Editing replaces grants. The token value, type, and expiration are preserved.' : 'Credentials are local to the relay. Upstream OAuth stays on the server.');
   await tokenModelOptions(project, token);
+  $('token-submit').disabled = false;
   text('token-submit', token ? 'Save grants' : 'Issue token'); $('token-dialog').showModal();
 }
 
@@ -488,6 +492,7 @@ async function saveToken() {
   const result = await api(path, state.editingToken ? 'PUT' : 'POST', data);
   $('token-dialog').close();
   if (!state.editingToken) showSecret(result); else notice('Token grants saved.');
+  $('token-project').value = state.tokenFormProject;
   await loadTokens();
   await refreshTelemetryScopes();
 }
@@ -733,7 +738,9 @@ async function routingChanged() {
 $('project-profile').addEventListener('change', () => task(null, routingChanged, 'project-form-error'));
 $('add-model-route').addEventListener('click', () => addRouteRow());
 async function tokenModelOptions(project, token) {
-  await loadRoutingInventories(); const inventory = combinedInventory(projectRouting(project));
+  await loadRoutingInventories();
+  if (project.project_id !== state.tokenFormProject) return;
+  const inventory = combinedInventory(projectRouting(project));
   modelOptions('token-models', inventory, token?.models || []); modelOptions('token-model-blocked', inventory, token?.blocked_models || []);
   text('token-model-note', 'Blocks win. Tokens inherit project routing and cannot expand its model ceiling. Existing unavailable grants remain visible.');
   await tokenModelPreview();
@@ -762,6 +769,18 @@ $('login-dialog').addEventListener('close', () => clearLogin(true));
 $('add-project').addEventListener('click', event => task(event.currentTarget, () => projectEditor()));
 $('project-form').addEventListener('submit', event => { event.preventDefault(); task(event.submitter, saveProject, 'project-form-error'); });
 $('token-project').addEventListener('change', event => task(event.currentTarget, loadTokens));
+$('token-form-project').addEventListener('change', event => task(event.currentTarget, async () => {
+  if (state.editingToken) return;
+  state.tokenFormProject = event.currentTarget.value;
+  ++previewGeneration;
+  const project = state.projects.find(item => item.project_id === state.tokenFormProject);
+  $('token-backend').value = providerName(project);
+  $('token-submit').disabled = true;
+  $('token-models').replaceChildren(); $('token-model-blocked').replaceChildren();
+  text('token-model-effective', 'Loading model access…');
+  await tokenModelOptions(project, null);
+  if (project.project_id === state.tokenFormProject) $('token-submit').disabled = false;
+}, 'token-form-error'));
 $('issue-token').addEventListener('click', () => tokenEditor());
 $('token-type').addEventListener('change', tokenTypeChanged);
 $('token-ephemeral').addEventListener('change', () => { $('token-name').required = !$('token-ephemeral').checked; $('token-expiry').placeholder = $('token-ephemeral').checked ? '1h' : '90d'; });
