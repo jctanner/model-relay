@@ -269,7 +269,7 @@ function renderAccounts() {
   $('add-account').disabled = !state.managementEnabled;
   text('accounts-note', state.loginAvailable ? `${number(state.accounts.length)} accounts · Browser login ready` : 'Claude login helper unavailable');
   $('account-rows').replaceChildren();
-  if (!state.accounts.length) emptyRow('account-rows', 6, 'Add an upstream account, then connect it using your browser.');
+  if (!state.accounts.length) emptyRow('account-rows', 7, 'Add an upstream account, then connect it using your browser.');
   for (const account of state.accounts) {
     const auth = account.upstream_auth || {}; const row = element('tr'); const actions = element('div', undefined, 'actions account-actions');
     const assigned = state.projects.filter(project => routingProfiles(projectRouting(project)).includes(account.profile_id));
@@ -290,7 +290,8 @@ function renderAccounts() {
     const label = active ? 'Login in progress' : auth.state === 'ready' ? 'Connected' : 'Needs connection';
     actions.append(button('Models', () => modelsEditor(account.profile_id)));
     const source = account.provider === 'vertex' ? `Vertex · ${auth.project_id || 'not configured'}${auth.region ? ' · ' + auth.region : ''}` : account.managed ? 'Relay managed' : 'Server configured';
-    row.append(cell(lines(account.display_name, account.account_id)), cell(badge(source)), cell(lines('', auth.last_error || auth.error ? 'Reconnect required or refresh unavailable' : ''), badge(label, active ? 'warn' : auth.state === 'ready' ? 'good' : 'warn')), cell(time(auth.expires_at)), cell(lines(number(assigned.length), assigned.map(project => project.project_id).join(', '))), cell(actions));
+    const provider = { anthropic: 'Anthropic OAuth', enmaas: 'EnMaaS', vertex: 'Google Vertex' }[account.provider] || account.provider || 'Unknown provider';
+    row.append(cell(lines(account.display_name, account.account_id)), cell(badge(provider)), cell(badge(source)), cell(lines('', auth.last_error || auth.error ? 'Reconnect required or refresh unavailable' : ''), badge(label, active ? 'warn' : auth.state === 'ready' ? 'good' : 'warn')), cell(time(auth.expires_at)), cell(lines(number(assigned.length), assigned.map(project => project.project_id).join(', '))), cell(actions));
     $('account-rows').append(row);
   }
 }
