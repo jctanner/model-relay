@@ -32,3 +32,7 @@
 
 Build and deploy the Breadboard instance with `make host-rebuild-relay`
 from the Breadboard root. See [AGENTS.md](../AGENTS.md).
+
+## CC-43
+
+- [Release workflows](tasks/current/cc-43-releases.md)
